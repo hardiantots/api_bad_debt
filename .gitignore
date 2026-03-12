@@ -1,0 +1,12 @@
+# Bad Debt Early-Warning System
+.env
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+node_modules/
+.next/
+*.log
