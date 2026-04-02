@@ -81,9 +81,9 @@ pip install -r requirements.txt
 # DB_USER=...
 # DB_PASSWORD=...
 # DB_HOST=...
-    # DB_NAME=...
+# DB_NAME=...
 
-    # 5. Jalankan Server API
+# 5. Jalankan Server API
     python -m uvicorn api:app --host 0.0.0.0 --port 8000
     # Atau jalankan file: start_api.bat (pastikan .venv sudah aktif)
     ```
@@ -105,26 +105,30 @@ pip install -r requirements.txt
     ├── .env                        # Konfigurasi Database & Global Env
     ├── start_api.bat               # Shortcut eksekusi native di Windows
     └── requirements.txt            # Daftar pustaka Python
-    ```
+````
 
-    ### Penjelasan Detail Komponen:
+### Penjelasan Detail Komponen:
 
-    #### 1. `api.py` (FastAPI Layer)
-    Mengelola seluruh _request_ dari REST Client/Frontend Next.js. Bertanggung jawab atas:
-    - **Registry Model**: Memetakan kunci model (misal: `stacked`) ke file `.joblib` berserta konvensi preprocessing sklearn.
-    - **Validation**: Memvalidasi target `target_trx_ids` hingga tanggal.
-    - **Endpoint Routing**: Menyediakan API untuk scoring mode DB dan Mode Upload File.
+#### 1. `api.py` (FastAPI Layer)
 
-    #### 2. `bad_debt_app/db.py` (Database Layer)
-    Pusat komunikasi data dengan MySQL, dirancang agar tidak macet / timeout:
-    - **Arsitektur "Two-Pass Query"**:
-      - _Pass 1_: Menarik spesifik target waktu transaksi (menggunakan filter `1w`, `custom`, dst).
-      - _Pass 2_: Mengkueri profil transaksi riewayat (*History*) hanya untuk para ID Pelanggan yang ditagihkan di periode yang relevan saja (sehingga ukuran load memori menurun drastis).
-    - Berjalan dengan integrasi pada tabel khusus CM netting: `ar_invoice_list_2`.
+Mengelola seluruh _request_ dari REST Client/Frontend Next.js. Bertanggung jawab atas:
 
-    #### 3. `bad_debt_app/features.py` (ML Pipeline)
+- **Registry Model**: Memetakan kunci model (misal: `stacked`) ke file `.joblib` berserta konvensi preprocessing sklearn.
+- **Validation**: Memvalidasi target `target_trx_ids` hingga tanggal.
+- **Endpoint Routing**: Menyediakan API untuk scoring mode DB dan Mode Upload File.
 
-Jantung pengolahan data untuk 16 fitur:
+#### 2. `bad_debt_app/db.py` (Database Layer)
+
+Pusat komunikasi data dengan MySQL, dirancang agar tidak macet / timeout:
+
+- **Arsitektur "Two-Pass Query"**:
+  - _Pass 1_: Menarik spesifik target waktu transaksi (menggunakan filter `1w`, `custom`, dst).
+  - _Pass 2_: Mengkueri profil transaksi riewayat (_History_) hanya untuk para ID Pelanggan yang ditagihkan di periode yang relevan saja (sehingga ukuran load memori menurun drastis).
+- Berjalan dengan integrasi pada tabel khusus CM netting: `ar_invoice_list_2`.
+
+#### 3. `bad_debt_app/features.py` (ML Pipeline)
+
+Pusat pengolahan data untuk 16 fitur:
 
 - **Historical Features (9)**: Agregasi perilaku pembayaran pelanggan masa lalu (e.g., `historical_avg_dpd`, `late_payment_ratio`).
 - **Survival Features (4)**: Probabilitas pembayaran dalam 30/60 hari dan perkiraan _hazard_ delay.
@@ -200,4 +204,7 @@ Memerlukan unggahan file CSV invoice & receipt secara manual melalui _form data_
 ---
 
 _Catatan: Segala perubahan pada logika fitur di `features.py` harus disinkronkan dengan schema di `feature_cols_stacked.json`._
-````
+
+```
+
+```
