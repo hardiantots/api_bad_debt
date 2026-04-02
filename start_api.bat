@@ -1,7 +1,9 @@
 @echo off
+setlocal
+
 echo ============================================
 echo  Bad Debt Early-Warning API
-echo  Starting on http://localhost:8000
+echo  Starting service...
 echo ============================================
 echo.
 
@@ -15,7 +17,16 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo [2/2] Starting API server...
-python -m uvicorn api:app --host 0.0.0.0 --port 8000 --reload
+if "%API_HOST%"=="" set API_HOST=0.0.0.0
+if "%API_PORT%"=="" set API_PORT=8000
+if "%UVICORN_RELOAD%"=="" set UVICORN_RELOAD=false
+
+echo [2/2] Starting API server on http://%API_HOST%:%API_PORT%
+
+if /I "%UVICORN_RELOAD%"=="true" (
+    python -m uvicorn api:app --host %API_HOST% --port %API_PORT% --reload
+) else (
+    python -m uvicorn api:app --host %API_HOST% --port %API_PORT%
+)
 
 pause

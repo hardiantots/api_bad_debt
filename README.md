@@ -1,210 +1,244 @@
-# Bad Debt Early-Warning API (16-Feature Pipeline)
+# Bad Debt Early-Warning API
 
-Sistem deteksi dini risiko _bad debt_ menggunakan **FastAPI**, didukung oleh **Stacked Model (16 fitur)** dan integrasi langsung ke database MySQL.
+FastAPI service untuk scoring risiko bad debt berbasis snapshot feature engineering.
 
-## 🚀 Fitur Utama
+## Tujuan
 
-- **16-Feature ML Pipeline**: Menghitung 9 fitur historis dan 4 fitur _survival_ secara dinamis untuk akurasi prediksi tinggi.
-- **Dynamic Time Filtering**: Mendukung _Quick Select_ (1w, 1m, dll.) dan _Custom Date Range_ (Dari - Ke) yang dibatasi secara otomatis oleh ketersediaan data di database.
-- **Flexible Data Source**: Dapat mengambil data langsung dari database atau melalui _upload_ file CSV.
-- **Auto-Anchoring**: Perhitungan rentang waktu secara otomatis merujuk pada tanggal transaksi terbaru di database, bukan waktu server saat ini.
+- Menyediakan endpoint scoring dari database dan upload file.
+- Menjaga inference pipeline sinkron dengan artifacts model.
+- Mendukung filtering customer affiliate Kalla Group dari hasil DB scoring.
+- Siap dijalankan di VM Windows maupun Linux.
 
-## 🔄 Sinkronisasi Dua Flow Notebook
+## Struktur Proyek
 
-API wrapper ini sudah dipetakan ke dua flow training notebook terbaru:
-
-- `stacked`:
-  - Artifact model: `artifacts/stacked_recall_driven_model.joblib`
-  - Schema fitur: `artifacts/feature_cols_stacked.json`
-- `lgbm_hyper_smote`:
-  - Artifact model: `artifacts/bad_debt_snapshot_lgbm_hyper_smote_16_features.joblib`
-  - Schema fitur: `artifacts/feature_cols_snapshot_16_features.json`
-
-Keduanya memakai flow data terbaru yang sama pada inference:
-
-- Credit memo netting berbasis `PREVIOUS_CUSTOMER_TRX_ID` sampai `snapshot_date`.
-- Feature engineering pre-due + historikal + survival (16 fitur).
-- Konvensi label training: `y_bad_debt_ever` (3 kondisi) dari notebook.
-
-Saat memanggil endpoint, pilih model lewat parameter `model`.
-Contoh:
-
-```bash
-# DB scoring dengan flow stacked
-curl "http://localhost:8000/db/score?model=stacked&snapshot_date=2026-02-06&time_range=1m"
-
-# DB scoring dengan flow lgbm_hyper_smote
-curl "http://localhost:8000/db/score?model=lgbm_hyper_smote&snapshot_date=2026-02-06&time_range=1m"
+```text
+Model API/
+├── .env
+├── api.py
+├── README.md
+├── requirements.txt
+├── start_api.bat
+├── start_api.sh
+├── artifacts/
+│   ├── stacked_recall_driven_model.joblib
+│   ├── bad_debt_snapshot_lgbm_hyper_smote_16_features.joblib
+│   ├── feature_cols_stacked.json
+│   ├── feature_cols_snapshot_16_features.json
+│   └── list_all_cust_affiliate_kalla.csv
+└── bad_debt_app/
+    ├── api/
+    │   ├── __init__.py
+    │   ├── config.py
+    │   ├── service.py
+    │   ├── routes_db.py
+    │   ├── routes_upload.py
+    │   └── routes_system.py
+    ├── data/
+    │   ├── __init__.py
+    │   ├── db.py
+    │   └── db_two_pass.py
+    └── feature_engineering/
+        ├── __init__.py
+        ├── io.py
+        ├── base.py
+        ├── pre_due.py
+        ├── history.py
+        ├── new_model.py
+        └── pipeline.py
 ```
 
-## 🛠️ Persiapan dan Instalasi
+## Prasyarat
 
-### Prasyarat
+- Python 3.10+
+- MySQL dengan tabel:
+  - ar_invoice_list_2
+  - ar_receipt_list
+  - OracleCustomer
 
-- **Python 3.10+** (disarankan 3.10.11)
-- **MySQL Database** dengan skema tabel: `ar_invoice_list_2`, `ar_receipt_list`, dan `OracleCustomer` (atau `OracleCustomer_slim` fallback).
-
-### Cara Menjalankan (Dengan Docker 🐳 - Direkomendasikan)
-
-Karena telah dilengkapi dengan `Dockerfile` dan `docker-compose.yml`, Anda dapat menjalankan API beserta seluruh komponennya dalam kontainer terisolasi:
+## Instalasi
 
 ```bash
-# 1. Pastikan Docker Desktop sudah berjalan
-# 2. Salin atau edit file .env dan masukkan kredensial DB
-# 3. Jalankan perintah compose:
-docker-compose up -d --build
-
-# Server API akan berjalan pada http://localhost:8000
-# Untuk mematikan server:
-docker-compose down
-```
-
-### Cara Menjalankan (Dengan Virtual Environment / Lokal)
-
-Jika Anda ingin melakukan proses _debugging_ atau _development_ secara langsung tanpa Docker:
-
-````bash
-# 1. Buat virtual environment
 python -m venv .venv
-
-# 2. Aktivasi virtual environment
-# Di Windows:
+# Windows
 .venv\Scripts\activate
-# Di Linux/Mac:
+# Linux
 # source .venv/bin/activate
 
-# 3. Install dependencies
 pip install -r requirements.txt
-
-# 4. Konfigurasi Database
-# Salin atau edit file .env dan masukkan kredensial:
-# DB_USER=...
-# DB_PASSWORD=...
-# DB_HOST=...
-# DB_NAME=...
-
-# 5. Jalankan Server API
-    python -m uvicorn api:app --host 0.0.0.0 --port 8000
-    # Atau jalankan file: start_api.bat (pastikan .venv sudah aktif)
-    ```
-
-    ## 📂 Struktur Proyek Terkini
-
-    ```text
-    Model API/
-    ├── api.py                      # Main Entry Point & FastAPI Endpoints
-    ├── bad_debt_app/               # Core Logic & Data Layer
-    │   ├── db.py                   # Konektivitas DB & Arsitektur "Two-Pass Query"
-    │   └── features.py             # Feature Engineering & 16-Feature Pipeline
-    ├── artifacts/                  # Model ML & Metadata
-    │   ├── stacked_recall_driven_model.joblib   # Model Stacked (Utama)
-    │   ├── bad_debt_snapshot_lgbm_...joblib     # Model LightGBM (Alternatif)
-    │   └── feature_cols_...json                 # Daftar file schema order fitur JSON
-    ├── docker-compose.yml          # Konfigurasi container komplit
-    ├── Dockerfile                  # Base image dan dependencies untuk environment
-    ├── .env                        # Konfigurasi Database & Global Env
-    ├── start_api.bat               # Shortcut eksekusi native di Windows
-    └── requirements.txt            # Daftar pustaka Python
-````
-
-### Penjelasan Detail Komponen:
-
-#### 1. `api.py` (FastAPI Layer)
-
-Mengelola seluruh _request_ dari REST Client/Frontend Next.js. Bertanggung jawab atas:
-
-- **Registry Model**: Memetakan kunci model (misal: `stacked`) ke file `.joblib` berserta konvensi preprocessing sklearn.
-- **Validation**: Memvalidasi target `target_trx_ids` hingga tanggal.
-- **Endpoint Routing**: Menyediakan API untuk scoring mode DB dan Mode Upload File.
-
-#### 2. `bad_debt_app/db.py` (Database Layer)
-
-Pusat komunikasi data dengan MySQL, dirancang agar tidak macet / timeout:
-
-- **Arsitektur "Two-Pass Query"**:
-  - _Pass 1_: Menarik spesifik target waktu transaksi (menggunakan filter `1w`, `custom`, dst).
-  - _Pass 2_: Mengkueri profil transaksi riewayat (_History_) hanya untuk para ID Pelanggan yang ditagihkan di periode yang relevan saja (sehingga ukuran load memori menurun drastis).
-- Berjalan dengan integrasi pada tabel khusus CM netting: `ar_invoice_list_2`.
-
-#### 3. `bad_debt_app/features.py` (ML Pipeline)
-
-Pusat pengolahan data untuk 16 fitur:
-
-- **Historical Features (9)**: Agregasi perilaku pembayaran pelanggan masa lalu (e.g., `historical_avg_dpd`, `late_payment_ratio`).
-- **Survival Features (4)**: Probabilitas pembayaran dalam 30/60 hari dan perkiraan _hazard_ delay.
-- **Preprocessing**: Menangani pembersihan data, _scaling_, dan konversi datetime.
-
-#### 4. `artifacts/`
-
-Folder penyimpanan aset statis:
-
-- **Models**: File `.joblib` hasil training (Stacked & LightGBM).
-- **Schema**: File `.json` yang memastikan urutan fitur saat kolom dikirim ke model ML tetap konsisten.
-
----
-
-## 🧩 Fleksibilitas & Konfigurasi
-
-API ini dirancang dengan tingkat fleksibilitas tinggi agar mudah beradaptasi dengan perubahan kebutuhan bisnis tanpa harus mengubah logika inti kode:
-
-1. **Hybrid Data Source (DB vs. Upload)**
-   - API mendukung pengambilan data langsung dari **Database MySQL** (untuk integrasi sistem) maupun via **Upload File CSV** (untuk keperluan audit mandiri atau simulasi data eksternal).
-
-2. **Dynamic Model Registry**
-   - Anda dapat mendaftarkan model baru (misal: versi v2, v3) cukup dengan menambahkan entitas baru pada variabel `MODEL_REGISTRY` di `api.py`. API akan otomatis mengenali model tersebut di Frontend tanpa perlu _restart_ server atau _hardcoding_ tambahan.
-
-3. **Konfigurasi Threshold Dinamis**
-   - Batas toleransi risiko (_Alert Threshold_) dapat diatur langsung melalui _query parameter_ atau UI Frontend. Ini memungkinkan tim analis untuk menyesuaikan sensitivitas peringatan dini (contoh: menurunkan threshold saat ingin lebih waspada terhadap potensi kerugian).
-
-4. **Independent Snapshotting**
-   - Pengguna bebas menentukan `snapshot_date`. Hal ini memungkinkan dilakukannya **Backtesting** (melakukan prediksi pada tanggal di masa lampau untuk melihat seberapa akurat model memprediksi _bad debt_ yang sudah terjadi).
-
----
-
-## � Penyimpanan Hasil Fitur (Feature Store-ready)
-
-Sistem ini dirancang agar hasil _Feature Engineering_ yang dihitung secara dinamis saat inferensi dapat disimpan kembali ke dalam database (**Feature Store**). Hal ini memungkinkan:
-
-1. **Audit & Debugging**: Melacak nilai fitur pelanggan pada tanggal snapshot tertentu tanpa harus menghitung ulang dari data mentah.
-2. **Monitoring Drift**: Memantau perubahan distribusi fitur (seperti `historical_avg_dpd`) dari waktu ke waktu untuk menentukan kapan model perlu dilatih ulang (_retraining_).
-3. **Integrasi BI**: Tabel fitur yang tersimpan dapat langsung dihubungkan ke alat visualisasi eksternal (Tableau/PowerBI) untuk analisis risiko mendalam.
-
-_Catatan: Implementasi penyimpanan dapat dilakukan dengan menambahkan fungsi `to_sql` pada objek DataFrame hasil `prepare_snapshot_features` di dalam `api.py`._
-
----
-
-## �🛰️ Daftar API Utama (DB-Backed)
-
-| Method  | Endpoint                            | Deskripsi                             | Parameter Utama                        |
-| :------ | :---------------------------------- | :------------------------------------ | :------------------------------------- |
-| **GET** | `/models`                           | Ambil daftar model & batas tanggal DB | -                                      |
-| **GET** | `/db/score`                         | Prediksi risiko seluruh invoice       | `time_range`, `start_date`, `end_date` |
-| **GET** | `/db/alerts`                        | Ambil hanya invoice berisiko tinggi   | `threshold` (default: 0.3)             |
-| **GET** | `/db/early_warning/receipt_trigger` | Simulasi _early warning_ dari DB      | `time_range`, `start_date`, `end_date` |
-| **GET** | `/db/score_csv`                     | Download hasil prediksi (CSV)         | `time_range`, `model`                  |
-
-### Endpoint File Upload
-
-Memerlukan unggahan file CSV invoice & receipt secara manual melalui _form data_.
-
-| Method   | Endpoint                         | Deskripsi                            | Parameter Utama            |
-| :------- | :------------------------------- | :----------------------------------- | :------------------------- |
-| **POST** | `/score`                         | Upload CSV → Hasil prediksi (JSON)   | -                          |
-| **POST** | `/score_csv`                     | Upload CSV → Hasil prediksi (CSV)    | -                          |
-| **POST** | `/alerts`                        | Upload CSV → Filter _high-risk_ JSON | `threshold` (default: 0.3) |
-| **POST** | `/early_warning/receipt_trigger` | Upload CSV → Early warning analisis  | -                          |
-
-### Endpoint Utilities
-
-| Method  | Endpoint  | Deskripsi                                       | Parameter Utama |
-| :------ | :-------- | :---------------------------------------------- | :-------------- |
-| **GET** | `/`       | Melakukan redirect otomatis ke antarmuka Web UI | -               |
-| **GET** | `/health` | Mengecek status dan konfigurasi default API     | -               |
-
----
-
-_Catatan: Segala perubahan pada logika fitur di `features.py` harus disinkronkan dengan schema di `feature_cols_stacked.json`._
-
 ```
 
+## Konfigurasi Environment
+
+Buat file .env di root Model API:
+
+```env
+DB_USER=...
+DB_PASSWORD=...
+DB_HOST=...
+DB_PORT=3306
+DB_NAME=...
+
+# Opsional keamanan API
+API_KEY=
+
+# Opsional runtime
+API_HOST=0.0.0.0
+API_PORT=8000
+UVICORN_RELOAD=false
+
+# Opsional threshold risiko
+THRESHOLD_LOW=0.3
+THRESHOLD_HIGH=0.6
+
+# Opsional CORS, pisahkan dengan koma
+CORS_ALLOW_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
+```
+
+Catatan:
+
+- Endpoint models tetap bisa merespons walau env DB belum lengkap, dengan fallback date range default.
+
+## Menjalankan API
+
+### Windows
+
+```bat
+start_api.bat
+```
+
+### Linux VM
+
+```bash
+chmod +x start_api.sh
+./start_api.sh
+```
+
+Atau langsung:
+
+```bash
+python -m uvicorn api:app --host 0.0.0.0 --port 8000
+```
+
+## Endpoint Utama
+
+### 1) System Endpoint
+
+- GET /health
+  - Fungsi: cek status service, default model, snapshot default, threshold, dan daftar model aktif.
+  - Kapan dipakai: monitoring uptime, smoke test deploy, validasi startup.
+
+- GET /models
+  - Fungsi: metadata model dan opsi time range untuk frontend.
+  - Output utama:
+    - models: daftar model pada registry.
+    - time_ranges: 1w, 2w, 1m, 3m, 6m, 1y, all, custom.
+    - min_date, max_date: rentang data dari DB (fallback jika DB belum siap).
+
+### 2) DB-backed Scoring Endpoint
+
+Semua endpoint DB mendukung parameter umum berikut (sesuai endpoint):
+
+- model: stacked atau lgbm_hyper_smote.
+- snapshot_date: tanggal acuan scoring, format YYYY-MM-DD.
+- time_range: 1w, 2w, 1m, 3m, 6m, 1y, all, custom.
+- start_date, end_date: dipakai jika time_range=custom.
+
+- GET /db/score
+  - Fungsi: scoring invoice hasil fetch DB.
+  - Output utama:
+    - total_invoices, risk_summary, high_risk_count.
+    - preview: daftar skor invoice.
+    - customer_risk_summary, customer_risk.
+    - top_efl_invoices (ranking expected financial loss).
+
+- GET /db/alerts
+  - Parameter tambahan: threshold (0.0-1.0).
+  - Fungsi: hanya menampilkan invoice dengan prob_bad_debt >= threshold.
+  - Output utama: alerts_count, alerts, risk_summary + customer_risk.
+
+- GET /db/score_csv
+  - Fungsi: hasil score DB dalam format CSV download.
+  - Output: file CSV attachment.
+
+- GET /db/early_warning/receipt_trigger
+  - Fungsi: mode early warning (analisis pre-due).
+  - Output utama: processed_invoices, alerts_count, high_risk_count, all_scores_preview, customer_risk.
+
+### 3) Upload-based Scoring Endpoint
+
+Semua endpoint upload menerima multipart/form-data:
+
+- invoice_csv (required)
+- receipt_csv (required)
+- customer_json (optional)
+- model (optional, default stacked)
+- snapshot_date (optional, default dari config)
+- customer_format (optional, misalnya csv/json/parquet)
+
+Daftar endpoint:
+
+- POST /score: output JSON (preview hasil scoring).
+- POST /score_csv: output CSV attachment.
+- POST /alerts: output JSON terfilter threshold.
+- POST /early_warning/receipt_trigger: output JSON mode early warning.
+
+Catatan:
+
+- Pada flow upload, jika customer_json tidak dikirim maka proses tetap berjalan tanpa fallback OracleCustomer_slim.
+
+## Alur Kerja API
+
+### A. Flow DB (disarankan untuk produksi)
+
+1. Client memanggil endpoint DB dengan model, snapshot_date, dan filter periode.
+2. Service fetch data invoice, receipt, customer dari database (strategi two-pass untuk efisiensi).
+3. Pipeline feature engineering membentuk fitur snapshot/pre-due.
+4. Service memuat model artifact + schema fitur, lalu menghitung probabilitas bad debt.
+5. Sistem membentuk output invoice-level (risk_level, recommended_action, expected_financial_loss).
+6. Sistem membentuk agregasi customer_risk.
+7. Sistem menjalankan filter affiliate dari artifacts/list_all_cust_affiliate_kalla.csv.
+8. Response dikirim ke client (JSON/CSV tergantung endpoint).
+
+### B. Flow Upload
+
+1. Client upload invoice_csv dan receipt_csv (customer_json opsional).
+2. Service membaca file, validasi ukuran upload, lalu parse menjadi dataframe.
+3. Pipeline feature engineering dan scoring model berjalan seperti flow DB.
+4. Response dikirim sesuai endpoint (JSON/CSV).
+
+### C. Flow Security Middleware
+
+1. Jika API_KEY kosong, request diproses normal.
+2. Jika API_KEY terisi, endpoint non-public harus kirim header:
+   - X-API-Key: <key>
+   - atau Authorization: Bearer <key>
+3. Jika key tidak valid, API mengembalikan 401.
+
+## Detail Flow Filter Affiliate
+
+Untuk endpoint DB:
+
+- Setelah data customer periode mingguan didapat dan proses scoring selesai, sistem menghapus customer yang termasuk daftar affiliate di artifacts/list_all_cust_affiliate_kalla.csv.
+- Penghapusan dilakukan pada hasil invoice list (preview, alerts, csv output) dan juga pada customer_risk.
+
+## Keamanan
+
+Jika API_KEY di-set, endpoint selain health/docs membutuhkan header:
+
+- X-API-Key: <key>
+- atau Authorization: Bearer <key>
+
+## Catatan Deployment VM
+
+- Set UVICORN_RELOAD=false untuk production.
+- Jalankan di balik reverse proxy (Nginx/Apache) jika endpoint diekspos publik.
+- Simpan .env sebagai secret file VM, jangan commit ke git.
+- Gunakan process manager:
+  - Linux: systemd/supervisor
+  - Windows Server: NSSM atau Task Scheduler service mode
+
+## Health Check
+
+```bash
+curl http://localhost:8000/health
 ```
