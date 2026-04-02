@@ -15,6 +15,7 @@ class RawInputFrames:
     invoice: pd.DataFrame
     receipt: pd.DataFrame
     customer: Optional[pd.DataFrame] = None
+    target_trx_ids: Optional[list] = None
 
 
 def _to_dt_naive(s: pd.Series) -> pd.Series:
@@ -152,6 +153,128 @@ def _maybe_filter_negative_unpaid_invoices(
     return df.loc[~mask_drop].copy()
 
 
+def apply_credit_memo_netting(
+    df_invoice: pd.DataFrame, snapshot_date: pd.Timestamp
+) -> pd.DataFrame:
+    """Apply Credit Memo (CM) netting to reduce TRX_AMOUNT.
+
+    If PREVIOUS_CUSTOMER_TRX_ID is present, those invoices are treated as credit memos
+    reducing the exposure of their parent invoice (up to the snapshot date).
+    """
+    if df_invoice.empty:
+        df_invoice["TRX_AMOUNT_GROSS"] = df_invoice.get("TRX_AMOUNT", 0.0)
+        df_invoice["credit_memo_reduction"] = 0.0
+        df_invoice["cm_count"] = 0
+        df_invoice["cm_first_date"] = pd.NaT
+        return df_invoice
+
+    df = df_invoice.copy()
+
+    # Save original gross amount
+    if "TRX_AMOUNT" in df.columns:
+        df["TRX_AMOUNT_GROSS"] = pd.to_numeric(
+            df["TRX_AMOUNT"], errors="coerce"
+        ).fillna(0.0)
+    else:
+        df["TRX_AMOUNT_GROSS"] = 0.0
+
+    df["TRX_AMOUNT"] = df["TRX_AMOUNT_GROSS"]
+
+    prev_col = None
+    for cand in ["previous_customer_trx_id", "PREVIOUS_CUSTOMER_TRX_ID"]:
+        if cand in df.columns:
+            prev_col = cand
+            break
+
+    # If no PREVIOUS_CUSTOMER_TRX_ID column, return early (backward compatible)
+    if prev_col is None:
+        df["credit_memo_reduction"] = 0.0
+        df["cm_count"] = 0
+        df["cm_first_date"] = pd.NaT
+        return df
+
+    # Find Credit Memos (CM)
+    cm_src = df[[prev_col, "TRX_AMOUNT", "TRX_DATE"]].copy()
+    cm_src = cm_src[cm_src[prev_col].notna()].copy()
+
+    if cm_src.empty:
+        df["credit_memo_reduction"] = 0.0
+        df["cm_count"] = 0
+        df["cm_first_date"] = pd.NaT
+        return df
+
+    # Standardize types for CM source
+    cm_src[prev_col] = pd.to_numeric(cm_src[prev_col], errors="coerce").astype("Int64")
+    cm_src["TRX_AMOUNT"] = pd.to_numeric(cm_src["TRX_AMOUNT"], errors="coerce").fillna(
+        0.0
+    )
+    cm_src["TRX_DATE_dt"] = _to_dt_naive(cm_src["TRX_DATE"])
+
+    # Anti-leakage: only consider CMs available at or before snapshot_date
+    cm_src = cm_src[
+        cm_src["TRX_DATE_dt"].notna() & (cm_src["TRX_DATE_dt"] <= snapshot_date)
+    ].copy()
+
+    # Aggregate by parent invoice ID
+    c = (
+        cm_src.groupby(prev_col, as_index=False)
+        .agg(
+            cm_amount_raw_sum=("TRX_AMOUNT", "sum"),  # Usually negative
+            cm_count=("TRX_AMOUNT", "size"),
+            cm_first_date=("TRX_DATE_dt", "min"),
+        )
+        .rename(columns={prev_col: "CUSTOMER_TRX_ID"})
+    )
+    c["CUSTOMER_TRX_ID"] = pd.to_numeric(c["CUSTOMER_TRX_ID"], errors="coerce").astype(
+        "Int64"
+    )
+
+    # Effective CM only reduces exposure (if positive, it's not a valid CM, cap at 0)
+    c["cm_amount_effective"] = c["cm_amount_raw_sum"].where(
+        c["cm_amount_raw_sum"] < 0, 0.0
+    )
+    c["credit_memo_reduction"] = (-c["cm_amount_effective"]).clip(lower=0.0)
+
+    # Merge back to parent invoices
+    df["CUSTOMER_TRX_ID_JOIN"] = pd.to_numeric(
+        df["CUSTOMER_TRX_ID"], errors="coerce"
+    ).astype("Int64")
+
+    df = df.merge(
+        c[
+            [
+                "CUSTOMER_TRX_ID",
+                "cm_amount_effective",
+                "credit_memo_reduction",
+                "cm_count",
+                "cm_first_date",
+            ]
+        ],
+        left_on="CUSTOMER_TRX_ID_JOIN",
+        right_on="CUSTOMER_TRX_ID",
+        how="left",
+        suffixes=("", "_cm"),
+    )
+
+    df["cm_amount_effective"] = df["cm_amount_effective"].fillna(0.0)
+    df["credit_memo_reduction"] = df["credit_memo_reduction"].fillna(0.0)
+    df["cm_count"] = df["cm_count"].fillna(0).astype(int)
+
+    # Netting: net = max(gross + effective_cm, 0)
+    # Note: effective_cm is negative here
+    net = (df["TRX_AMOUNT_GROSS"] + df["cm_amount_effective"]).clip(lower=0.0)
+
+    df["TRX_AMOUNT"] = net
+
+    df.drop(
+        columns=["CUSTOMER_TRX_ID_JOIN", "CUSTOMER_TRX_ID_cm", "cm_amount_effective"],
+        inplace=True,
+        errors="ignore",
+    )
+
+    return df
+
+
 def prepare_base_tables(
     raw: RawInputFrames,
     snapshot_date: pd.Timestamp,
@@ -160,6 +283,9 @@ def prepare_base_tables(
     """Prepare df_inv (invoice table) and df_pay_raw (payment table) from raw inputs."""
 
     df_invoice = _maybe_filter_negative_unpaid_invoices(raw.invoice, raw.receipt)
+
+    # Apply Credit Memo Netting
+    df_invoice = apply_credit_memo_netting(df_invoice, snapshot_date)
 
     # Basic invoice schema
     required_invoice = ["CUSTOMER_TRX_ID", "TRX_DATE", "DUE_DATE", "TRX_AMOUNT"]
@@ -286,6 +412,10 @@ def prepare_base_tables(
             "TRANS_TYPE",
             "CURRENCY_CODE",
             "ORG_ID",
+            "TRX_AMOUNT_GROSS",
+            "credit_memo_reduction",
+            "cm_count",
+            "cm_first_date",
         ]
         if c in df_invoice.columns
     ]
@@ -375,6 +505,8 @@ def make_features_pre_due(
             "TRANS_TYPE",
             "CURRENCY_CODE",
             "ORG_ID",
+            "TRX_AMOUNT_GROSS",
+            "credit_memo_reduction",
         ]
         if c in df_inv.columns
     ]
@@ -1045,6 +1177,8 @@ def prepare_monitoring_features(
             "ACCOUNT_NUMBER",
             "CUSTOMER_NAME",
             "cust_master_missing",
+            "TRX_AMOUNT_GROSS",
+            "credit_memo_reduction",
         ]
         if c in df_inv.columns
     ]

@@ -9,18 +9,61 @@ Sistem deteksi dini risiko _bad debt_ menggunakan **FastAPI**, didukung oleh **S
 - **Flexible Data Source**: Dapat mengambil data langsung dari database atau melalui _upload_ file CSV.
 - **Auto-Anchoring**: Perhitungan rentang waktu secara otomatis merujuk pada tanggal transaksi terbaru di database, bukan waktu server saat ini.
 
+## 🔄 Sinkronisasi Dua Flow Notebook
+
+API wrapper ini sudah dipetakan ke dua flow training notebook terbaru:
+
+- `stacked`:
+  - Artifact model: `artifacts/stacked_recall_driven_model.joblib`
+  - Schema fitur: `artifacts/feature_cols_stacked.json`
+- `lgbm_hyper_smote`:
+  - Artifact model: `artifacts/bad_debt_snapshot_lgbm_hyper_smote_16_features.joblib`
+  - Schema fitur: `artifacts/feature_cols_snapshot_16_features.json`
+
+Keduanya memakai flow data terbaru yang sama pada inference:
+
+- Credit memo netting berbasis `PREVIOUS_CUSTOMER_TRX_ID` sampai `snapshot_date`.
+- Feature engineering pre-due + historikal + survival (16 fitur).
+- Konvensi label training: `y_bad_debt_ever` (3 kondisi) dari notebook.
+
+Saat memanggil endpoint, pilih model lewat parameter `model`.
+Contoh:
+
+```bash
+# DB scoring dengan flow stacked
+curl "http://localhost:8000/db/score?model=stacked&snapshot_date=2026-02-06&time_range=1m"
+
+# DB scoring dengan flow lgbm_hyper_smote
+curl "http://localhost:8000/db/score?model=lgbm_hyper_smote&snapshot_date=2026-02-06&time_range=1m"
+```
+
 ## 🛠️ Persiapan dan Instalasi
 
 ### Prasyarat
 
 - **Python 3.10+** (disarankan 3.10.11)
-- **MySQL Database** dengan skema tabel: `ar_invoice_list`, `ar_receipt_list`, dan `OracleCustomer` (atau `OracleCustomer_slim` fallback).
+- **MySQL Database** dengan skema tabel: `ar_invoice_list_2`, `ar_receipt_list`, dan `OracleCustomer` (atau `OracleCustomer_slim` fallback).
 
-### Cara Menjalankan (Dengan Virtual Environment)
+### Cara Menjalankan (Dengan Docker 🐳 - Direkomendasikan)
 
-Disarankan untuk menjalankan aplikasi di dalam _virtual environment_ (`.venv`) agar dependensi tidak bentrok dengan proyek lain.
+Karena telah dilengkapi dengan `Dockerfile` dan `docker-compose.yml`, Anda dapat menjalankan API beserta seluruh komponennya dalam kontainer terisolasi:
 
 ```bash
+# 1. Pastikan Docker Desktop sudah berjalan
+# 2. Salin atau edit file .env dan masukkan kredensial DB
+# 3. Jalankan perintah compose:
+docker-compose up -d --build
+
+# Server API akan berjalan pada http://localhost:8000
+# Untuk mematikan server:
+docker-compose down
+```
+
+### Cara Menjalankan (Dengan Virtual Environment / Lokal)
+
+Jika Anda ingin melakukan proses _debugging_ atau _development_ secara langsung tanpa Docker:
+
+````bash
 # 1. Buat virtual environment
 python -m venv .venv
 
@@ -38,49 +81,48 @@ pip install -r requirements.txt
 # DB_USER=...
 # DB_PASSWORD=...
 # DB_HOST=...
-# DB_NAME=...
+    # DB_NAME=...
 
-# 5. Jalankan Server API
-python -m uvicorn api:app --host 0.0.0.0 --port 8000
-# Atau jalankan file: start_api.bat (pastikan .venv sudah aktif)
-```
+    # 5. Jalankan Server API
+    python -m uvicorn api:app --host 0.0.0.0 --port 8000
+    # Atau jalankan file: start_api.bat (pastikan .venv sudah aktif)
+    ```
 
-## 📂 Struktur Proyek
+    ## 📂 Struktur Proyek Terkini
 
-```text
-Model API/
-├── api.py                      # Main Entry Point & FastAPI Endpoints
-├── bad_debt_app/               # Core Logic & Data Layer
-│   ├── db.py                   # Konektivitas DB & Query Generator
-│   └── features.py             # Feature Engineering & 16-Feature Pipeline
-├── artifacts/                  # Model ML & Metadata
-│   ├── stacked_recall_driven_model.joblib   # Model Stacked (Utama)
-│   ├── bad_debt_snapshot_lgbm_...joblib     # Model LightGBM (Alternative)
-│   └── feature_cols_stacked.json            # Daftar fitur (Schema)
-├── .env                        # Konfigurasi Database & Global Env
-├── start_api.bat               # Shortcut eksekusi di Windows
-└── requirements.txt            # Daftar pustaka Python
-```
+    ```text
+    Model API/
+    ├── api.py                      # Main Entry Point & FastAPI Endpoints
+    ├── bad_debt_app/               # Core Logic & Data Layer
+    │   ├── db.py                   # Konektivitas DB & Arsitektur "Two-Pass Query"
+    │   └── features.py             # Feature Engineering & 16-Feature Pipeline
+    ├── artifacts/                  # Model ML & Metadata
+    │   ├── stacked_recall_driven_model.joblib   # Model Stacked (Utama)
+    │   ├── bad_debt_snapshot_lgbm_...joblib     # Model LightGBM (Alternatif)
+    │   └── feature_cols_...json                 # Daftar file schema order fitur JSON
+    ├── docker-compose.yml          # Konfigurasi container komplit
+    ├── Dockerfile                  # Base image dan dependencies untuk environment
+    ├── .env                        # Konfigurasi Database & Global Env
+    ├── start_api.bat               # Shortcut eksekusi native di Windows
+    └── requirements.txt            # Daftar pustaka Python
+    ```
 
-### Penjelasan Detail Komponen:
+    ### Penjelasan Detail Komponen:
 
-#### 1. `api.py` (FastAPI Layer)
+    #### 1. `api.py` (FastAPI Layer)
+    Mengelola seluruh _request_ dari REST Client/Frontend Next.js. Bertanggung jawab atas:
+    - **Registry Model**: Memetakan kunci model (misal: `stacked`) ke file `.joblib` berserta konvensi preprocessing sklearn.
+    - **Validation**: Memvalidasi target `target_trx_ids` hingga tanggal.
+    - **Endpoint Routing**: Menyediakan API untuk scoring mode DB dan Mode Upload File.
 
-Mengelola seluruh _request_ dari Frontend. Bertanggung jawab atas:
+    #### 2. `bad_debt_app/db.py` (Database Layer)
+    Pusat komunikasi data dengan MySQL, dirancang agar tidak macet / timeout:
+    - **Arsitektur "Two-Pass Query"**:
+      - _Pass 1_: Menarik spesifik target waktu transaksi (menggunakan filter `1w`, `custom`, dst).
+      - _Pass 2_: Mengkueri profil transaksi riewayat (*History*) hanya untuk para ID Pelanggan yang ditagihkan di periode yang relevan saja (sehingga ukuran load memori menurun drastis).
+    - Berjalan dengan integrasi pada tabel khusus CM netting: `ar_invoice_list_2`.
 
-- **Registry Model**: Memetakan kunci model (misal: `stacked`) ke file `.joblib` yang sesuai.
-- **Validation**: Memvalidasi format tanggal dan ukuran file _upload_.
-- **Endpoint Routing**: Menyediakan API untuk scoring database, upload file, dan metadata dashboard.
-
-#### 2. `bad_debt_app/db.py` (Database Layer)
-
-Pusat komunikasi data dengan MySQL:
-
-- **`get_data_date_range()`**: Mencari tanggal TRX_DATE terkecil dan terbesar di database untuk membatasi kalender di Frontend.
-- **Query Builder**: Membangun perintah SQL untuk mengambil invoice dan receipt berdasarkan rentang waktu dinamis atau kustom.
-- **Engine Management**: Mengelola _connection pool_ menggunakan SQLAlchemy.
-
-#### 3. `bad_debt_app/features.py` (ML Pipeline)
+    #### 3. `bad_debt_app/features.py` (ML Pipeline)
 
 Jantung pengolahan data untuk 16 fitur:
 
@@ -158,3 +200,4 @@ Memerlukan unggahan file CSV invoice & receipt secara manual melalui _form data_
 ---
 
 _Catatan: Segala perubahan pada logika fitur di `features.py` harus disinkronkan dengan schema di `feature_cols_stacked.json`._
+````

@@ -1,0 +1,18 @@
+[
+  "TRX_AMOUNT_log1p",
+  "days_to_due",
+  "party_prior_invoice_cnt",
+  "customer_maturity_days",
+  "business_scale_proxy",
+  "historical_avg_dpd",
+  "historical_late_payment_ratio",
+  "unpaid_exposure_ratio",
+  "payment_consistency_variance",
+  "historical_partial_payment_freq",
+  "hist_avg_payment_completion_ratio",
+  "total_outstanding_at_trx",
+  "prob_paid_within_30d",
+  "prob_paid_within_60d",
+  "median_payment_delay",
+  "hazard_approx"
+]

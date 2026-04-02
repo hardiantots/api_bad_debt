@@ -46,18 +46,26 @@ MODEL_REGISTRY = {
         "model_path": str(_BASE_DIR / "artifacts/stacked_recall_driven_model.joblib"),
         "schema_path": str(_BASE_DIR / "artifacts/feature_cols_stacked.json"),
         "label": "Model Stacked (LightGBM + LR)",
+        "training_flow": "Test Stacked SMOTE, Auto Search Parameter & Updated",
+        "label_strategy": "y_bad_debt_ever (3 kondisi)",
+        "credit_memo_policy": "netting PREVIOUS_CUSTOMER_TRX_ID sampai snapshot_date",
     },
     "lgbm_hyper_smote": {
         "model_path": str(
             _BASE_DIR
             / "artifacts/bad_debt_snapshot_lgbm_hyper_smote_16_features.joblib"
         ),
-        "schema_path": str(_BASE_DIR / "artifacts/feature_cols_stacked.json"),
+        "schema_path": str(
+            _BASE_DIR / "artifacts/feature_cols_snapshot_16_features.json"
+        ),
         "label": "LightGBM",
+        "training_flow": "Test_New_CM_SMOTE",
+        "label_strategy": "y_bad_debt_ever (3 kondisi)",
+        "credit_memo_policy": "netting PREVIOUS_CUSTOMER_TRX_ID sampai snapshot_date",
     },
 }
 DEFAULT_MODEL_KEY = "stacked"
-DEFAULT_SNAPSHOT_DATE = os.getenv("BAD_DEBT_SNAPSHOT_DATE", "2026-02-10")
+DEFAULT_SNAPSHOT_DATE = os.getenv("BAD_DEBT_SNAPSHOT_DATE", "2026-03-15")
 
 # ── Auto-fallback customer file ──
 DEFAULT_CUSTOMER_CSV = _BASE_DIR / "artifacts" / "OracleCustomer_slim.csv"
@@ -115,6 +123,22 @@ def _resolve_model(model_key: str | None) -> dict:
     if not model_key or model_key not in MODEL_REGISTRY:
         return MODEL_REGISTRY[DEFAULT_MODEL_KEY]
     return MODEL_REGISTRY[model_key]
+
+
+def _resolve_model_key(model_key: str | None) -> str:
+    if not model_key or model_key not in MODEL_REGISTRY:
+        return DEFAULT_MODEL_KEY
+    return model_key
+
+
+def _model_public_info(model_key: str, model_info: dict) -> dict:
+    return {
+        "key": model_key,
+        "label": model_info.get("label", model_key),
+        "training_flow": model_info.get("training_flow"),
+        "label_strategy": model_info.get("label_strategy"),
+        "credit_memo_policy": model_info.get("credit_memo_policy"),
+    }
 
 
 def _load_schema(path: str) -> list[str]:
@@ -200,7 +224,9 @@ def _score_snapshot(
         return snap_result
     snap = snap_result
 
-    model_info = _resolve_model(model_key)
+    resolved_model_key = _resolve_model_key(model_key)
+    model_info = dict(_resolve_model(resolved_model_key))
+    model_info["key"] = resolved_model_key
     model_path = model_info["model_path"]
     schema_path = model_info["schema_path"]
     df_feat, _ = prepare_snapshot_features(raw, snapshot_date=snap)
@@ -311,7 +337,31 @@ def _score_snapshot(
     if "CUSTOMER_NAME" in df_feat.columns and df_feat["CUSTOMER_NAME"].notna().any():
         cols["CUSTOMER_NAME"] = df_feat["CUSTOMER_NAME"]
     cols["CUSTOMER_TRX_ID"] = df_feat.get("CUSTOMER_TRX_ID")
+
+    if "TRX_DATE" in df_feat.columns:
+        try:
+            cols["TRX_DATE"] = pd.to_datetime(
+                df_feat["TRX_DATE"], errors="coerce"
+            ).dt.strftime("%Y-%m-%d")
+        except Exception:
+            cols["TRX_DATE"] = df_feat["TRX_DATE"].astype(str)
+
+    if "DUE_DATE" in df_feat.columns:
+        try:
+            cols["DUE_DATE"] = pd.to_datetime(
+                df_feat["DUE_DATE"], errors="coerce"
+            ).dt.strftime("%Y-%m-%d")
+        except Exception:
+            cols["DUE_DATE"] = df_feat["DUE_DATE"].astype(str)
+
+    if "days_to_due" in df_feat.columns:
+        cols["days_to_due"] = df_feat["days_to_due"]
+
     if "TRX_AMOUNT" in df_feat.columns:
+        if "TRX_AMOUNT_GROSS" in df_feat.columns:
+            cols["TRX_AMOUNT_GROSS"] = df_feat["TRX_AMOUNT_GROSS"]
+        if "credit_memo_reduction" in df_feat.columns:
+            cols["credit_memo_reduction"] = df_feat["credit_memo_reduction"]
         cols["TRX_AMOUNT"] = df_feat["TRX_AMOUNT"]
         try:
             amt_num = (
@@ -326,6 +376,23 @@ def _score_snapshot(
     cols["recommended_action"] = [_recommend_action(_classify_risk(p)) for p in proba]
 
     df_result = pd.DataFrame(cols)
+
+    # -------- Two-Pass Output Filtering --------
+    # If the request used two-pass (DB mode), filter to the target requested invoices
+    # so we don't output scores for 3 years of historical background invoices.
+    if getattr(raw, "target_trx_ids", None) is not None:
+        target_ids = (
+            pd.Series(raw.target_trx_ids)
+            .apply(pd.to_numeric, errors="coerce")
+            .dropna()
+            .astype("int64")
+            .tolist()
+        )
+        mask = df_result["CUSTOMER_TRX_ID"].isin(target_ids)
+        df_result = df_result[mask].copy()
+        df_feat = df_feat[mask].copy()
+        proba = proba[mask.values].copy()
+
     return df_result, df_feat, proba, model_info
 
 
@@ -340,6 +407,9 @@ def _compute_scores(*, raw, snapshot_date: str) -> pd.DataFrame | JSONResponse:
 
 def _build_customer_risk(df_feat: pd.DataFrame, proba: np.ndarray) -> pd.DataFrame:
     """Aggregate invoice scores into customer risk metrics."""
+    if df_feat.empty:
+        return pd.DataFrame()
+
     df = df_feat.copy()
     df["prob_bad_debt"] = proba
 
@@ -529,6 +599,7 @@ def health():
         "default_model": DEFAULT_MODEL_KEY,
         "snapshot_date": DEFAULT_SNAPSHOT_DATE,
         "thresholds": {"low": THRESHOLD_LOW, "high": THRESHOLD_HIGH},
+        "models": [_model_public_info(k, v) for k, v in MODEL_REGISTRY.items()],
     }
 
 
@@ -585,6 +656,9 @@ async def score(
     )
     return {
         "mode": "snapshot",
+        "model_key": m_info.get("key", model),
+        "model_flow": m_info.get("training_flow"),
+        "label_strategy": m_info.get("label_strategy"),
         "snapshot_date": snapshot_date,
         "total_invoices": int(out.shape[0]),
         "risk_summary": risk_summary,
@@ -690,6 +764,9 @@ async def alerts(
     return {
         "mode": "snapshot",
         "threshold": threshold,
+        "model_key": m_info.get("key", model),
+        "model_flow": m_info.get("training_flow"),
+        "label_strategy": m_info.get("label_strategy"),
         "snapshot_date": snapshot_date,
         "total_invoices": int(out.shape[0]),
         "alerts_count": int(alerts_df.shape[0]),
@@ -757,6 +834,9 @@ async def receipt_trigger(
     return {
         "mode": "early_warning",
         "analysis_type": "Early-Warning (Pre-Due Analysis)",
+        "model_key": m_info.get("key", model),
+        "model_flow": m_info.get("training_flow"),
+        "label_strategy": m_info.get("label_strategy"),
         "model_label": m_info["label"],
         "feature_count": len(feature_cols),
         "snapshot_date": snapshot_date,
@@ -784,7 +864,7 @@ def list_models():
 
     dates = get_data_date_range()
     return {
-        "models": [{"key": k, "label": v["label"]} for k, v in MODEL_REGISTRY.items()],
+        "models": [_model_public_info(k, v) for k, v in MODEL_REGISTRY.items()],
         "time_ranges": [{"key": k, "label": v} for k, v in TIME_RANGE_OPTIONS.items()],
         "min_date": dates.get("min_date"),
         "max_date": dates.get("max_date"),
@@ -802,7 +882,10 @@ def db_score(
     """Score invoices from database using the stacked model."""
     try:
         raw = fetch_raw_inputs(
-            time_range=time_range, start_date=start_date, end_date=end_date
+            time_range=time_range,
+            start_date=start_date,
+            end_date=end_date,
+            snapshot_date=snapshot_date,
         )
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"DB error: {e}"})
@@ -825,6 +908,9 @@ def db_score(
     )
     return {
         "mode": "snapshot",
+        "model_key": m_info.get("key", model),
+        "model_flow": m_info.get("training_flow"),
+        "label_strategy": m_info.get("label_strategy"),
         "snapshot_date": snapshot_date,
         "time_range": time_range,
         "model_label": m_info["label"],
@@ -849,7 +935,10 @@ def db_score_csv(
     """Score invoices from database - CSV download."""
     try:
         raw = fetch_raw_inputs(
-            time_range=time_range, start_date=start_date, end_date=end_date
+            time_range=time_range,
+            start_date=start_date,
+            end_date=end_date,
+            snapshot_date=snapshot_date,
         )
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"DB error: {e}"})
@@ -878,7 +967,10 @@ def db_alerts(
     """Return only invoices above risk threshold from database."""
     try:
         raw = fetch_raw_inputs(
-            time_range=time_range, start_date=start_date, end_date=end_date
+            time_range=time_range,
+            start_date=start_date,
+            end_date=end_date,
+            snapshot_date=snapshot_date,
         )
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"DB error: {e}"})
@@ -902,6 +994,9 @@ def db_alerts(
     return {
         "mode": "snapshot",
         "threshold": threshold,
+        "model_key": m_info.get("key", model),
+        "model_flow": m_info.get("training_flow"),
+        "label_strategy": m_info.get("label_strategy"),
         "snapshot_date": snapshot_date,
         "time_range": time_range,
         "model_label": m_info["label"],
@@ -930,7 +1025,10 @@ def db_receipt_trigger(
     """Early-Warning receipt trigger analysis from database."""
     try:
         raw = fetch_raw_inputs(
-            time_range=time_range, start_date=start_date, end_date=end_date
+            time_range=time_range,
+            start_date=start_date,
+            end_date=end_date,
+            snapshot_date=snapshot_date,
         )
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": f"DB error: {e}"})
@@ -957,6 +1055,9 @@ def db_receipt_trigger(
         "mode": "early_warning",
         "analysis_type": "Early-Warning (Pre-Due Analysis)",
         "analysis_description": "Mengevaluasi risiko bad debt SEBELUM jatuh tempo.",
+        "model_key": m_info.get("key", model),
+        "model_flow": m_info.get("training_flow"),
+        "label_strategy": m_info.get("label_strategy"),
         "model_label": m_info["label"],
         "feature_count": len(feature_cols),
         "snapshot_date": snapshot_date,
