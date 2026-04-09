@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from datetime import date
 from pathlib import Path
 
 APP_TITLE = "Bad Debt Early-Warning API"
@@ -32,7 +33,7 @@ MODEL_REGISTRY = {
 }
 
 DEFAULT_MODEL_KEY = "stacked"
-DEFAULT_SNAPSHOT_DATE = os.getenv("BAD_DEBT_SNAPSHOT_DATE", "2026-03-15")
+DEFAULT_SNAPSHOT_DATE = os.getenv("BAD_DEBT_SNAPSHOT_DATE", date.today().isoformat())
 
 THRESHOLD_LOW = float(os.getenv("THRESHOLD_LOW", "0.3"))
 THRESHOLD_HIGH = float(os.getenv("THRESHOLD_HIGH", "0.6"))
@@ -52,3 +53,17 @@ if _cors_origins_env.strip():
     ALLOW_ORIGINS = [o.strip() for o in _cors_origins_env.split(",") if o.strip()]
 else:
     ALLOW_ORIGINS = ["http://localhost:3000", "http://127.0.0.1:3000"]
+
+# ── Scheduler & Compute ──────────────────────────────────────────────
+COMPUTE_SCHEDULE_HOUR = int(os.getenv("COMPUTE_SCHEDULE_HOUR", "6"))
+COMPUTE_AUTO_ENABLED = os.getenv("COMPUTE_AUTO_ENABLED", "true").lower() == "true"
+COMPUTE_DEFAULT_TIME_RANGE = os.getenv("COMPUTE_DEFAULT_TIME_RANGE", "3m")
+COMPUTE_KEEP_DAYS = int(os.getenv("COMPUTE_KEEP_DAYS", "30"))
+COMPUTE_MAX_RUNNING_MINUTES = int(os.getenv("COMPUTE_MAX_RUNNING_MINUTES", "180"))
+COMPUTE_AUTO_RECOVER_STALE = (
+    os.getenv("COMPUTE_AUTO_RECOVER_STALE", "true").lower() == "true"
+)
+
+# ── Pagination ────────────────────────────────────────────────────────
+DEFAULT_PAGE_SIZE = 50
+MAX_PAGE_SIZE = 200

@@ -4,7 +4,8 @@ FastAPI service untuk scoring risiko bad debt berbasis snapshot feature engineer
 
 ## Tujuan
 
-- Menyediakan endpoint scoring dari database dan upload file.
+- Menyediakan arsitektur hybrid: read dari MySQL, write hasil scoring ke SQLite lokal.
+- Memisahkan proses compute (trigger async) dan proses baca hasil (read-only, paginated).
 - Menjaga inference pipeline sinkron dengan artifacts model.
 - Mendukung filtering customer affiliate Kalla Group dari hasil DB scoring.
 - Siap dijalankan di VM Windows maupun Linux.
@@ -30,13 +31,15 @@ Model API/
     │   ├── __init__.py
     │   ├── config.py
     │   ├── service.py
+  │   ├── routes_compute.py
     │   ├── routes_db.py
     │   ├── routes_upload.py
     │   └── routes_system.py
     ├── data/
     │   ├── __init__.py
     │   ├── db.py
-    │   └── db_two_pass.py
+  │   ├── db_two_pass.py
+  │   └── models.py
     └── feature_engineering/
         ├── __init__.py
         ├── io.py
@@ -54,6 +57,10 @@ Model API/
   - ar_invoice_list_2
   - ar_receipt_list
   - OracleCustomer
+
+Catatan akses:
+
+- Saat akses MySQL bersifat read-only, API tetap berjalan penuh karena hasil scoring disimpan di SQLite lokal.
 
 ## Instalasi
 
@@ -92,11 +99,17 @@ THRESHOLD_HIGH=0.6
 
 # Opsional CORS, pisahkan dengan koma
 CORS_ALLOW_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
+
+# Scheduler compute otomatis
+COMPUTE_SCHEDULE_HOUR=6
+COMPUTE_AUTO_ENABLED=true
+COMPUTE_DEFAULT_TIME_RANGE=3m
+COMPUTE_KEEP_DAYS=30
 ```
 
 Catatan:
 
-- Endpoint models tetap bisa merespons walau env DB belum lengkap, dengan fallback date range default.
+- Endpoint /models tetap bisa merespons walau env DB belum lengkap, dengan fallback date range default.
 
 ## Menjalankan API
 
@@ -119,7 +132,89 @@ Atau langsung:
 python -m uvicorn api:app --host 0.0.0.0 --port 8000
 ```
 
+## Ringkasan Arsitektur Hybrid
+
+1. Trigger compute via POST /db/compute.
+2. API fetch data source dari MySQL (invoice, receipt, customer).
+3. API jalankan feature engineering + scoring model.
+4. Hasil invoice-level dan customer-level disimpan ke local_data/scoring.db.
+5. Endpoint GET /db/\* hanya membaca hasil pre-computed dari SQLite lokal (read-only, paginated).
+
 ## Endpoint Utama
+
+## Update Kontrak API (April 2026)
+
+Bagian ini merangkum perubahan terbaru supaya frontend, QA, dan tim integrasi punya referensi cepat.
+
+### A. Perubahan endpoint dan parameter
+
+1. POST /db/compute
+
+- Tetap sebagai trigger async compute.
+- Response sukses: 202 Accepted + job_id.
+- Jika job lain masih running: 409.
+
+2. GET /db/score
+
+- Tetap read-only dari SQLite (hasil pre-computed).
+- Mendukung page, page_size, sort_by, sort_order, search, risk_level.
+- Jika time_range=custom, start_date dan end_date wajib dikirim.
+- Jika custom range tidak lengkap, response 422.
+
+3. GET /db/customer_risk
+
+- Mendukung page, page_size, sort_by, sort_order, search, risk_cust.
+- Jika time_range=custom, start_date dan end_date wajib dikirim.
+- Jika custom range tidak lengkap, response 422.
+
+4. GET /db/alerts
+
+- Mendukung threshold + pagination + sorting + search.
+- Jika time_range=custom, start_date dan end_date wajib dikirim.
+
+5. GET /db/early_warning/receipt_trigger
+
+- Kini mendukung risk_level dan search (selain pagination/sorting).
+- Jika time_range=custom, start_date dan end_date wajib dikirim.
+
+6. GET /db/score_csv
+
+- Tetap export seluruh hasil score pre-computed.
+- Jika time_range=custom, start_date dan end_date wajib dikirim.
+
+### B. Perubahan behavior penting
+
+1. Pemilihan job untuk read-only endpoint lebih aman pada custom range.
+
+- Lookup latest job tidak hanya model + snapshot_date + time_range.
+- Untuk custom, start_date dan end_date ikut dipakai untuk menghindari mismatch antar window custom.
+
+2. Scheduler auto-compute berjalan dengan snapshot harian dinamis.
+
+- Snapshot date otomatis memakai tanggal hari ini saat scheduler men-trigger job.
+- Jam tetap mengikuti COMPUTE_SCHEDULE_HOUR.
+
+3. Validasi no pre-compute tetap konsisten.
+
+- Jika belum ada hasil compute untuk kombinasi parameter yang diminta, endpoint read-only mengembalikan 404 + hint untuk menjalankan POST /db/compute.
+
+4. Penyimpanan hasil compute memakai strategi replace partition.
+
+- Untuk kombinasi partisi yang sama (model_key + snapshot_date + time_range, dan khusus custom juga start_date + end_date), data hasil compute lama akan dihapus dulu sebelum insert hasil baru.
+- Tujuan: mencegah duplikasi row lintas job dan memastikan perubahan invoice terbaru menimpa hasil lama pada partisi yang sama.
+
+5. Sequencing replace partition dibuat aman untuk read path.
+
+- Job baru menyimpan hasil dulu, lalu job ditandai completed, setelah itu barulah data partisi lama dibersihkan.
+- Dengan urutan ini, endpoint GET tetap bisa membaca data completed sebelumnya selama compute baru masih running (menghindari gap data sementara).
+
+### C. Status code yang perlu di-handle client
+
+1. 200: Read endpoint sukses.
+2. 202: Compute job berhasil ditrigger.
+3. 404: Hasil pre-compute belum tersedia untuk parameter tersebut.
+4. 409: Compute ditolak karena masih ada job running.
+5. 422: Parameter custom range tidak lengkap (start_date/end_date wajib).
 
 ### 1) System Endpoint
 
@@ -134,37 +229,63 @@ python -m uvicorn api:app --host 0.0.0.0 --port 8000
     - time_ranges: 1w, 2w, 1m, 3m, 6m, 1y, all, custom.
     - min_date, max_date: rentang data dari DB (fallback jika DB belum siap).
 
-### 2) DB-backed Scoring Endpoint
+### 2) Compute Endpoint (Write ke SQLite)
 
-Semua endpoint DB mendukung parameter umum berikut (sesuai endpoint):
+- POST /db/compute
+  - Fungsi: trigger scoring background (async).
+  - Jika ada job running lain, API merespons 409.
+  - Output: 202 Accepted + job_id.
+
+- GET /db/compute/status
+  - Fungsi: status job terakhir.
+
+- GET /db/compute/status/{job_id}
+  - Fungsi: status detail job tertentu.
+
+- GET /db/compute/history
+  - Fungsi: list histori compute jobs.
+
+### 3) DB Read-only Endpoint (Baca Hasil Pre-computed)
+
+Semua endpoint ini tidak menjalankan scoring real-time. Data dibaca dari SQLite berdasarkan hasil compute terbaru.
+
+Parameter umum (sesuai endpoint):
 
 - model: stacked atau lgbm_hyper_smote.
 - snapshot_date: tanggal acuan scoring, format YYYY-MM-DD.
 - time_range: 1w, 2w, 1m, 3m, 6m, 1y, all, custom.
-- start_date, end_date: dipakai jika time_range=custom.
+- page, page_size: pagination.
+- sort_by, sort_order: sorting.
+- search, risk_level/risk_cust: filtering.
 
 - GET /db/score
-  - Fungsi: scoring invoice hasil fetch DB.
+  - Fungsi: list hasil score invoice (paginated).
   - Output utama:
-    - total_invoices, risk_summary, high_risk_count.
+    - last_computed_at, job_id, total_invoices.
+    - pagination.
+    - risk_summary, high_risk_count.
     - preview: daftar skor invoice.
-    - customer_risk_summary, customer_risk.
+    - customer_risk_summary.
     - top_efl_invoices (ranking expected financial loss).
+
+- GET /db/customer_risk
+  - Fungsi: list agregasi customer risk (paginated).
+  - Output utama: pagination, customer_risk_summary, customer_risk.
 
 - GET /db/alerts
   - Parameter tambahan: threshold (0.0-1.0).
-  - Fungsi: hanya menampilkan invoice dengan prob_bad_debt >= threshold.
-  - Output utama: alerts_count, alerts, risk_summary + customer_risk.
+  - Fungsi: hanya menampilkan invoice dengan prob_bad_debt >= threshold (paginated).
+  - Output utama: alerts_count, pagination, alerts, risk_summary.
 
 - GET /db/score_csv
-  - Fungsi: hasil score DB dalam format CSV download.
+  - Fungsi: export seluruh hasil score pre-computed dalam format CSV.
   - Output: file CSV attachment.
 
 - GET /db/early_warning/receipt_trigger
-  - Fungsi: mode early warning (analisis pre-due).
-  - Output utama: processed_invoices, alerts_count, high_risk_count, all_scores_preview, customer_risk.
+  - Fungsi: mode early warning dari data pre-computed (paginated).
+  - Output utama: processed_invoices, alerts_count, high_risk_count, all_scores_preview, top_efl_invoices.
 
-### 3) Upload-based Scoring Endpoint
+### 4) Upload-based Scoring Endpoint
 
 Semua endpoint upload menerima multipart/form-data:
 
@@ -188,25 +309,47 @@ Catatan:
 
 ## Alur Kerja API
 
-### A. Flow DB (disarankan untuk produksi)
+### A. Flow Compute (Hybrid)
 
-1. Client memanggil endpoint DB dengan model, snapshot_date, dan filter periode.
-2. Service fetch data invoice, receipt, customer dari database (strategi two-pass untuk efisiensi).
-3. Pipeline feature engineering membentuk fitur snapshot/pre-due.
-4. Service memuat model artifact + schema fitur, lalu menghitung probabilitas bad debt.
-5. Sistem membentuk output invoice-level (risk_level, recommended_action, expected_financial_loss).
-6. Sistem membentuk agregasi customer_risk.
-7. Sistem menjalankan filter affiliate dari artifacts/list_all_cust_affiliate_kalla.csv.
-8. Response dikirim ke client (JSON/CSV tergantung endpoint).
+1. Client memanggil POST /db/compute.
+2. API membuat compute job status=running.
+3. Background task menjalankan fetch raw data dari MySQL.
+4. Pipeline feature engineering + model scoring dijalankan.
+5. Hasil invoice score disimpan ke bad_debt_score_results (SQLite).
+6. Hasil customer risk disimpan ke bad_debt_customer_risk (SQLite).
+7. Job diupdate menjadi completed + metadata summary.
+8. Replace partition: data hasil job lama pada partisi yang sama dibersihkan (untuk mencegah duplikasi).
+9. Data job lama (retention) dibersihkan sesuai COMPUTE_KEEP_DAYS.
 
-### B. Flow Upload
+Catatan partisi replace:
+
+- Kunci partisi standard: model_key + snapshot_date + time_range.
+- Kunci partisi custom: model_key + snapshot_date + time_range + start_date + end_date.
+- Histori compute job tetap disimpan untuk audit, tetapi row hasil data lama pada partisi yang sama akan digantikan.
+
+### B. Flow Read-only DB Endpoint
+
+1. Client memanggil GET /db/score atau endpoint DB read lain.
+2. API cari latest completed job untuk kombinasi model + snapshot_date + time_range.
+3. Jika time_range=custom, start_date dan end_date ikut dipakai untuk memilih job yang tepat.
+4. API query data dari SQLite menggunakan pagination/filter/sort.
+5. API kirim response terstruktur dengan pagination metadata.
+
+### C. Flow Scheduler
+
+1. Saat startup, API memastikan tabel SQLite tersedia.
+2. Jika COMPUTE_AUTO_ENABLED=true, APScheduler aktif.
+3. Scheduler menjalankan auto compute setiap hari jam COMPUTE_SCHEDULE_HOUR.
+4. Snapshot date untuk auto compute diisi otomatis dengan tanggal berjalan (dinamis harian).
+
+### D. Flow Upload
 
 1. Client upload invoice_csv dan receipt_csv (customer_json opsional).
 2. Service membaca file, validasi ukuran upload, lalu parse menjadi dataframe.
 3. Pipeline feature engineering dan scoring model berjalan seperti flow DB.
 4. Response dikirim sesuai endpoint (JSON/CSV).
 
-### C. Flow Security Middleware
+### E. Flow Security Middleware
 
 1. Jika API_KEY kosong, request diproses normal.
 2. Jika API_KEY terisi, endpoint non-public harus kirim header:
@@ -216,10 +359,10 @@ Catatan:
 
 ## Detail Flow Filter Affiliate
 
-Untuk endpoint DB:
+Untuk proses compute dari data DB:
 
-- Setelah data customer periode mingguan didapat dan proses scoring selesai, sistem menghapus customer yang termasuk daftar affiliate di artifacts/list_all_cust_affiliate_kalla.csv.
-- Penghapusan dilakukan pada hasil invoice list (preview, alerts, csv output) dan juga pada customer_risk.
+- Setelah data customer periode scoring didapat dan proses scoring selesai, sistem menghapus customer yang termasuk daftar affiliate di artifacts/list_all_cust_affiliate_kalla.csv.
+- Penghapusan diterapkan sebelum data disimpan ke SQLite sehingga endpoint GET /db/\* otomatis membaca data yang sudah bersih.
 
 ## Keamanan
 
@@ -233,9 +376,30 @@ Jika API_KEY di-set, endpoint selain health/docs membutuhkan header:
 - Set UVICORN_RELOAD=false untuk production.
 - Jalankan di balik reverse proxy (Nginx/Apache) jika endpoint diekspos publik.
 - Simpan .env sebagai secret file VM, jangan commit ke git.
+- Pastikan folder local_data writable oleh proses API (untuk file scoring.db).
 - Gunakan process manager:
   - Linux: systemd/supervisor
   - Windows Server: NSSM atau Task Scheduler service mode
+
+## Contoh Quick Start Hybrid
+
+1. Trigger compute:
+
+```bash
+curl -X POST "http://localhost:8000/db/compute?model=stacked&snapshot_date=2026-03-15&time_range=1w"
+```
+
+2. Cek status job:
+
+```bash
+curl "http://localhost:8000/db/compute/status"
+```
+
+3. Baca hasil paginated:
+
+```bash
+curl "http://localhost:8000/db/score?model=stacked&snapshot_date=2026-03-15&time_range=1w&page=1&page_size=50&sort_by=prob_bad_debt&sort_order=desc"
+```
 
 ## Health Check
 
