@@ -20,6 +20,7 @@ from typing import Optional, TYPE_CHECKING
 import pandas as pd
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.engine import URL, Engine
 
 logger = logging.getLogger("bad_debt_api")
@@ -400,16 +401,27 @@ def publish_score_to_hasil_baddebt(
                     "sd": snapshot_date,
                     "tr": time_range,
                 }
-                result = conn.execute(
-                    text(
-                        f"DELETE FROM {target_table} "
-                        "WHERE source_model_key=:mk "
-                        "AND source_snapshot_date=:sd "
-                        "AND source_time_range=:tr"
-                    ),
-                    params,
-                )
-                rows_deleted = int(result.rowcount or 0)
+                try:
+                    result = conn.execute(
+                        text(
+                            f"DELETE FROM {target_table} "
+                            "WHERE source_model_key=:mk "
+                            "AND source_snapshot_date=:sd "
+                            "AND source_time_range=:tr"
+                        ),
+                        params,
+                    )
+                    rows_deleted = int(result.rowcount or 0)
+                except OperationalError as exc:
+                    err_text = str(exc).lower()
+                    if "delete command denied" in err_text:
+                        replace_skipped_reason = "replace_partition skipped because DB user has no DELETE privilege"
+                        logger.warning(
+                            "Publish append-only fallback for table %s: DELETE denied",
+                            target_table,
+                        )
+                    else:
+                        raise
             else:
                 replace_skipped_reason = (
                     "replace_partition skipped because target table lacks "

@@ -16,6 +16,7 @@ from bad_debt_app.api.config import (
     API_KEY,
     APP_TITLE,
     COMPUTE_AUTO_PUBLISH_SCORE_TO_MYSQL,
+    COMPUTE_PUBLISH_REPLACE_PARTITION,
     COMPUTE_AUTO_RECOVER_STALE,
     BASE_DIR,
     COMPUTE_AUTO_ENABLED,
@@ -193,7 +194,7 @@ def _auto_compute():
                     time_range=tr,
                     source_job_id=job_id,
                     target_table=COMPUTE_PUBLISH_TARGET_TABLE,
-                    replace_partition=True,
+                    replace_partition=COMPUTE_PUBLISH_REPLACE_PARTITION,
                 )
                 logger.info(
                     "Scheduler auto-published score for job %s to %s (%d rows)",
