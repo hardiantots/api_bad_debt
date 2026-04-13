@@ -645,10 +645,18 @@ def get_latest_mysql_source_job(
     time_range: str,
     target_table: str = "hasil_baddebt",
 ) -> dict | None:
-    """Return latest source_job_id and basic metadata from MySQL publish table."""
+    """Return latest source_job_id and basic metadata from MySQL publish table.
+
+    Fallback order:
+    1) exact model + snapshot + range
+    2) model + range (latest snapshot)
+    3) model only (latest publish)
+    4) latest publish globally
+    """
     _validate_table_name(target_table)
     engine = get_engine()
     with engine.connect() as conn:
+        # 1) exact model + snapshot + range
         row = (
             conn.execute(
                 text(
@@ -670,8 +678,9 @@ def get_latest_mysql_source_job(
             .mappings()
             .fetchone()
         )
+
+        # 2) model + range (latest snapshot)
         if not row:
-            # Fallback: if no exact snapshot match, return latest available for the model+range.
             row = (
                 conn.execute(
                     text(
@@ -688,6 +697,48 @@ def get_latest_mysql_source_job(
                         "ORDER BY source_snapshot_date DESC, last_published_at DESC LIMIT 1"
                     ),
                     {"mk": model_key, "tr": time_range},
+                )
+                .mappings()
+                .fetchone()
+            )
+
+        # 3) model only (latest publish)
+        if not row:
+            row = (
+                conn.execute(
+                    text(
+                        f"SELECT "
+                        "COALESCE(source_job_id, job_id) AS source_job_id, "
+                        "COALESCE(source_snapshot_date, snapshot_date) AS source_snapshot_date, "
+                        "MAX(published_at) AS last_published_at, "
+                        "COUNT(*) AS total_invoices "
+                        f"FROM {target_table} "
+                        "WHERE COALESCE(source_model_key, model_key)=:mk "
+                        "AND COALESCE(source_job_id, job_id) IS NOT NULL "
+                        "GROUP BY COALESCE(source_job_id, job_id), COALESCE(source_snapshot_date, snapshot_date) "
+                        "ORDER BY source_snapshot_date DESC, last_published_at DESC LIMIT 1"
+                    ),
+                    {"mk": model_key},
+                )
+                .mappings()
+                .fetchone()
+            )
+
+        # 4) latest publish globally
+        if not row:
+            row = (
+                conn.execute(
+                    text(
+                        f"SELECT "
+                        "COALESCE(source_job_id, job_id) AS source_job_id, "
+                        "COALESCE(source_snapshot_date, snapshot_date) AS source_snapshot_date, "
+                        "MAX(published_at) AS last_published_at, "
+                        "COUNT(*) AS total_invoices "
+                        f"FROM {target_table} "
+                        "WHERE COALESCE(source_job_id, job_id) IS NOT NULL "
+                        "GROUP BY COALESCE(source_job_id, job_id), COALESCE(source_snapshot_date, snapshot_date) "
+                        "ORDER BY source_snapshot_date DESC, last_published_at DESC LIMIT 1"
+                    )
                 )
                 .mappings()
                 .fetchone()
