@@ -26,13 +26,13 @@ from bad_debt_app.api.config import (
 from bad_debt_app.api.service import model_public_info
 from bad_debt_app.data.db import (
     TIME_RANGE_OPTIONS,
-    fetch_mysql_scores_df_by_source_job,
+    fetch_mysql_scores_df,
     get_latest_mysql_source_job,
     get_data_date_range,
-    query_mysql_alerts_by_source_job,
-    query_mysql_risk_summary_by_source_job,
-    query_mysql_score_results_by_source_job,
-    query_mysql_top_efl_by_source_job,
+    query_mysql_alerts,
+    query_mysql_risk_summary,
+    query_mysql_score_results,
+    query_mysql_top_efl,
 )
 from bad_debt_app.data.models import (
     get_latest_job,
@@ -138,8 +138,10 @@ def db_score(
 
     job_id = str(mysql_job["source_job_id"])
 
-    records, total = query_mysql_score_results_by_source_job(
-        source_job_id=job_id,
+    records, total = query_mysql_score_results(
+        model_key=resolved_key,
+        snapshot_date=snapshot_date,
+        time_range=time_range,
         page=page,
         page_size=page_size,
         sort_by=sort_by,
@@ -151,13 +153,17 @@ def db_score(
     if total == 0:
         return _no_results_response()
 
-    risk_summary = query_mysql_risk_summary_by_source_job(
-        source_job_id=job_id,
+    risk_summary = query_mysql_risk_summary(
+        model_key=resolved_key,
+        snapshot_date=snapshot_date,
+        time_range=time_range,
         target_table=COMPUTE_PUBLISH_TARGET_TABLE,
     )
 
-    top_efl = query_mysql_top_efl_by_source_job(
-        source_job_id=job_id,
+    top_efl = query_mysql_top_efl(
+        model_key=resolved_key,
+        snapshot_date=snapshot_date,
+        time_range=time_range,
         top_n=50,
         target_table=COMPUTE_PUBLISH_TARGET_TABLE,
     )
@@ -294,8 +300,10 @@ def db_alerts(
 
     job_id = str(mysql_job["source_job_id"])
 
-    rows, alerts_count = query_mysql_alerts_by_source_job(
-        source_job_id=job_id,
+    rows, alerts_count = query_mysql_alerts(
+        model_key=resolved_key,
+        snapshot_date=snapshot_date,
+        time_range=time_range,
         threshold=threshold,
         page=page,
         page_size=page_size,
@@ -305,8 +313,10 @@ def db_alerts(
         target_table=COMPUTE_PUBLISH_TARGET_TABLE,
     )
 
-    risk_summary = query_mysql_risk_summary_by_source_job(
-        source_job_id=job_id,
+    risk_summary = query_mysql_risk_summary(
+        model_key=resolved_key,
+        snapshot_date=snapshot_date,
+        time_range=time_range,
         target_table=COMPUTE_PUBLISH_TARGET_TABLE,
     )
 
@@ -329,8 +339,10 @@ def db_alerts(
         "pagination": _pagination_meta(page, page_size, int(alerts_count)),
         "risk_summary": risk_summary,
         "alerts": rows,
-        "top_efl_invoices": query_mysql_top_efl_by_source_job(
-            source_job_id=job_id,
+        "top_efl_invoices": query_mysql_top_efl(
+            model_key=resolved_key,
+            snapshot_date=snapshot_date,
+            time_range=time_range,
             top_n=50,
             target_table=COMPUTE_PUBLISH_TARGET_TABLE,
         ),
@@ -371,8 +383,10 @@ def db_score_csv(
     if job is None:
         return _no_results_response()
 
-    df = fetch_mysql_scores_df_by_source_job(
-        source_job_id=job["job_id"],
+    df = fetch_mysql_scores_df(
+        model_key=resolved_key,
+        snapshot_date=snapshot_date,
+        time_range=time_range,
         target_table=COMPUTE_PUBLISH_TARGET_TABLE,
     )
     if df.empty:
@@ -433,8 +447,10 @@ def db_receipt_trigger(
     job_id = str(mysql_job["source_job_id"])
 
     # All scores (paginated)
-    records, total = query_mysql_score_results_by_source_job(
-        source_job_id=job_id,
+    records, total = query_mysql_score_results(
+        model_key=resolved_key,
+        snapshot_date=snapshot_date,
+        time_range=time_range,
         page=page,
         page_size=page_size,
         sort_by=sort_by,
@@ -446,13 +462,17 @@ def db_receipt_trigger(
     if total == 0:
         return _no_results_response()
 
-    risk_summary = query_mysql_risk_summary_by_source_job(
-        source_job_id=job_id,
+    risk_summary = query_mysql_risk_summary(
+        model_key=resolved_key,
+        snapshot_date=snapshot_date,
+        time_range=time_range,
         target_table=COMPUTE_PUBLISH_TARGET_TABLE,
     )
 
-    _, alerts_count = query_mysql_alerts_by_source_job(
-        source_job_id=job_id,
+    _, alerts_count = query_mysql_alerts(
+        model_key=resolved_key,
+        snapshot_date=snapshot_date,
+        time_range=time_range,
         threshold=THRESHOLD_LOW,
         page=1,
         page_size=1,
@@ -461,8 +481,10 @@ def db_receipt_trigger(
         search=search,
         target_table=COMPUTE_PUBLISH_TARGET_TABLE,
     )
-    _, high_risk_count = query_mysql_alerts_by_source_job(
-        source_job_id=job_id,
+    _, high_risk_count = query_mysql_alerts(
+        model_key=resolved_key,
+        snapshot_date=snapshot_date,
+        time_range=time_range,
         threshold=THRESHOLD_HIGH,
         page=1,
         page_size=1,
@@ -493,8 +515,10 @@ def db_receipt_trigger(
         "alerts_count": int(alerts_count),
         "high_risk_count": int(high_risk_count),
         "all_scores_preview": records,
-        "top_efl_invoices": query_mysql_top_efl_by_source_job(
-            source_job_id=job_id,
+        "top_efl_invoices": query_mysql_top_efl(
+            model_key=resolved_key,
+            snapshot_date=snapshot_date,
+            time_range=time_range,
             top_n=50,
             target_table=COMPUTE_PUBLISH_TARGET_TABLE,
         ),
