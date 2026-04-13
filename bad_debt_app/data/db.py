@@ -371,7 +371,7 @@ def publish_score_to_hasil_baddebt(
 
     for c in rec.columns:
         lower_c = c.lower()
-        if lower_c in {"id"}:
+        if lower_c in {"id", "job_id", "source_job_id"}:
             continue
         if lower_c.endswith("_id") or lower_c in {
             "days_to_due",
@@ -474,9 +474,11 @@ def _validate_table_name(table_name: str) -> None:
         raise RuntimeError("Invalid target table name.")
 
 
-def query_mysql_score_results_by_source_job(
+def query_mysql_score_results(
     *,
-    source_job_id: str,
+    model_key: str,
+    snapshot_date: str,
+    time_range: str,
     page: int,
     page_size: int,
     sort_by: str,
@@ -492,8 +494,10 @@ def query_mysql_score_results_by_source_job(
         "desc" if sort_order.lower() not in ("asc", "desc") else sort_order.lower()
     )
 
-    where = ["(source_job_id=:jid OR (source_job_id IS NULL AND job_id=:jid))"]
-    params: dict[str, object] = {"jid": source_job_id}
+    where = [
+        "(COALESCE(source_model_key, model_key)=:mk AND COALESCE(source_snapshot_date, snapshot_date)=:sd AND COALESCE(source_time_range, time_range)=:tr)"
+    ]
+    params: dict[str, object] = {"mk": model_key, "sd": snapshot_date, "tr": time_range}
     if risk_level in ("HIGH", "MEDIUM", "LOW"):
         where.append("risk_level=:rl")
         params["rl"] = risk_level
@@ -532,8 +536,13 @@ def query_mysql_score_results_by_source_job(
     return [dict(r) for r in rows], int(total)
 
 
-def query_mysql_top_efl_by_source_job(
-    *, source_job_id: str, top_n: int = 50, target_table: str = "hasil_baddebt"
+def query_mysql_top_efl(
+    *,
+    model_key: str,
+    snapshot_date: str,
+    time_range: str,
+    top_n: int = 50,
+    target_table: str = "hasil_baddebt",
 ) -> list[dict]:
     _validate_table_name(target_table)
     cols = (
@@ -548,11 +557,11 @@ def query_mysql_top_efl_by_source_job(
             conn.execute(
                 text(
                     f"SELECT {cols} FROM {target_table} "
-                    "WHERE (source_job_id=:jid OR (source_job_id IS NULL AND job_id=:jid)) "
+                    "WHERE (COALESCE(source_model_key, model_key)=:mk AND COALESCE(source_snapshot_date, snapshot_date)=:sd AND COALESCE(source_time_range, time_range)=:tr) "
                     "AND expected_financial_loss IS NOT NULL "
                     "ORDER BY expected_financial_loss DESC LIMIT :n"
                 ),
-                {"jid": source_job_id, "n": top_n},
+                {"mk": model_key, "sd": snapshot_date, "tr": time_range, "n": top_n},
             )
             .mappings()
             .fetchall()
@@ -560,9 +569,11 @@ def query_mysql_top_efl_by_source_job(
     return [dict(r) for r in rows]
 
 
-def query_mysql_alerts_by_source_job(
+def query_mysql_alerts(
     *,
-    source_job_id: str,
+    model_key: str,
+    snapshot_date: str,
+    time_range: str,
     threshold: float,
     page: int,
     page_size: int,
@@ -584,10 +595,15 @@ def query_mysql_alerts_by_source_job(
     )
 
     where = [
-        "(source_job_id=:jid OR (source_job_id IS NULL AND job_id=:jid))",
+        "(COALESCE(source_model_key, model_key)=:mk AND COALESCE(source_snapshot_date, snapshot_date)=:sd AND COALESCE(source_time_range, time_range)=:tr)",
         "prob_bad_debt>=:thr",
     ]
-    params: dict[str, object] = {"jid": source_job_id, "thr": threshold}
+    params: dict[str, object] = {
+        "mk": model_key,
+        "sd": snapshot_date,
+        "tr": time_range,
+        "thr": threshold,
+    }
     if search:
         where.append("CUSTOMER_NAME LIKE :s")
         params["s"] = f"%{search}%"
@@ -623,18 +639,22 @@ def query_mysql_alerts_by_source_job(
     return [dict(r) for r in rows], int(total)
 
 
-def fetch_mysql_scores_df_by_source_job(
-    *, source_job_id: str, target_table: str = "hasil_baddebt"
+def fetch_mysql_scores_df(
+    *,
+    model_key: str,
+    snapshot_date: str,
+    time_range: str,
+    target_table: str = "hasil_baddebt",
 ) -> pd.DataFrame:
     _validate_table_name(target_table)
     engine = get_engine()
     return pd.read_sql(
         text(
             f"SELECT * FROM {target_table} "
-            "WHERE (source_job_id=:jid OR (source_job_id IS NULL AND job_id=:jid))"
+            "WHERE (COALESCE(source_model_key, model_key)=:mk AND COALESCE(source_snapshot_date, snapshot_date)=:sd AND COALESCE(source_time_range, time_range)=:tr)"
         ),
         engine,
-        params={"jid": source_job_id},
+        params={"mk": model_key, "sd": snapshot_date, "tr": time_range},
     )
 
 
@@ -645,18 +665,9 @@ def get_latest_mysql_source_job(
     time_range: str,
     target_table: str = "hasil_baddebt",
 ) -> dict | None:
-    """Return latest source_job_id and basic metadata from MySQL publish table.
-
-    Fallback order:
-    1) exact model + snapshot + range
-    2) model + range (latest snapshot)
-    3) model only (latest publish)
-    4) latest publish globally
-    """
     _validate_table_name(target_table)
     engine = get_engine()
     with engine.connect() as conn:
-        # 1) exact model + snapshot + range
         row = (
             conn.execute(
                 text(
@@ -669,87 +680,26 @@ def get_latest_mysql_source_job(
                     "WHERE COALESCE(source_model_key, model_key)=:mk "
                     "AND COALESCE(source_snapshot_date, snapshot_date)=:sd "
                     "AND COALESCE(source_time_range, time_range)=:tr "
-                    "AND COALESCE(source_job_id, job_id) IS NOT NULL "
                     "GROUP BY COALESCE(source_job_id, job_id), COALESCE(source_snapshot_date, snapshot_date) "
-                    "ORDER BY last_published_at DESC, source_job_id DESC LIMIT 1"
+                    "ORDER BY last_published_at DESC LIMIT 1"
                 ),
                 {"mk": model_key, "sd": snapshot_date, "tr": time_range},
             )
             .mappings()
             .fetchone()
         )
+    return dict(row) if row else None
 
-        # 2) model + range (latest snapshot)
-        if not row:
-            row = (
-                conn.execute(
-                    text(
-                        f"SELECT "
-                        "COALESCE(source_job_id, job_id) AS source_job_id, "
-                        "COALESCE(source_snapshot_date, snapshot_date) AS source_snapshot_date, "
-                        "MAX(published_at) AS last_published_at, "
-                        "COUNT(*) AS total_invoices "
-                        f"FROM {target_table} "
-                        "WHERE COALESCE(source_model_key, model_key)=:mk "
-                        "AND COALESCE(source_time_range, time_range)=:tr "
-                        "AND COALESCE(source_job_id, job_id) IS NOT NULL "
-                        "GROUP BY COALESCE(source_job_id, job_id), COALESCE(source_snapshot_date, snapshot_date) "
-                        "ORDER BY source_snapshot_date DESC, last_published_at DESC LIMIT 1"
-                    ),
-                    {"mk": model_key, "tr": time_range},
-                )
-                .mappings()
-                .fetchone()
-            )
-
-        # 3) model only (latest publish)
-        if not row:
-            row = (
-                conn.execute(
-                    text(
-                        f"SELECT "
-                        "COALESCE(source_job_id, job_id) AS source_job_id, "
-                        "COALESCE(source_snapshot_date, snapshot_date) AS source_snapshot_date, "
-                        "MAX(published_at) AS last_published_at, "
-                        "COUNT(*) AS total_invoices "
-                        f"FROM {target_table} "
-                        "WHERE COALESCE(source_model_key, model_key)=:mk "
-                        "AND COALESCE(source_job_id, job_id) IS NOT NULL "
-                        "GROUP BY COALESCE(source_job_id, job_id), COALESCE(source_snapshot_date, snapshot_date) "
-                        "ORDER BY source_snapshot_date DESC, last_published_at DESC LIMIT 1"
-                    ),
-                    {"mk": model_key},
-                )
-                .mappings()
-                .fetchone()
-            )
-
-        # 4) latest publish globally
-        if not row:
-            row = (
-                conn.execute(
-                    text(
-                        f"SELECT "
-                        "COALESCE(source_job_id, job_id) AS source_job_id, "
-                        "COALESCE(source_snapshot_date, snapshot_date) AS source_snapshot_date, "
-                        "MAX(published_at) AS last_published_at, "
-                        "COUNT(*) AS total_invoices "
-                        f"FROM {target_table} "
-                        "WHERE COALESCE(source_job_id, job_id) IS NOT NULL "
-                        "GROUP BY COALESCE(source_job_id, job_id), COALESCE(source_snapshot_date, snapshot_date) "
-                        "ORDER BY source_snapshot_date DESC, last_published_at DESC LIMIT 1"
-                    )
-                )
-                .mappings()
-                .fetchone()
-            )
-    if not row:
-        return None
+    # Keep old func definition to find it
     return dict(row)
 
 
-def query_mysql_risk_summary_by_source_job(
-    *, source_job_id: str, target_table: str = "hasil_baddebt"
+def query_mysql_risk_summary(
+    *,
+    model_key: str,
+    snapshot_date: str,
+    time_range: str,
+    target_table: str = "hasil_baddebt",
 ) -> dict[str, int]:
     _validate_table_name(target_table)
     engine = get_engine()
@@ -758,10 +708,10 @@ def query_mysql_risk_summary_by_source_job(
             conn.execute(
                 text(
                     f"SELECT risk_level, COUNT(*) AS cnt FROM {target_table} "
-                    "WHERE (source_job_id=:jid OR (source_job_id IS NULL AND job_id=:jid)) "
+                    "WHERE (COALESCE(source_model_key, model_key)=:mk AND COALESCE(source_snapshot_date, snapshot_date)=:sd AND COALESCE(source_time_range, time_range)=:tr) "
                     "GROUP BY risk_level"
                 ),
-                {"jid": source_job_id},
+                {"mk": model_key, "sd": snapshot_date, "tr": time_range},
             )
             .mappings()
             .fetchall()
