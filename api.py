@@ -15,12 +15,14 @@ from bad_debt_app.api.config import (
     ALLOW_ORIGINS,
     API_KEY,
     APP_TITLE,
+    COMPUTE_AUTO_PUBLISH_SCORE_TO_MYSQL,
     COMPUTE_AUTO_RECOVER_STALE,
     BASE_DIR,
     COMPUTE_AUTO_ENABLED,
     COMPUTE_DEFAULT_TIME_RANGE,
     COMPUTE_KEEP_DAYS,
     COMPUTE_MAX_RUNNING_MINUTES,
+    COMPUTE_PUBLISH_TARGET_TABLE,
     COMPUTE_SCHEDULE_HOUR,
     DEFAULT_MODEL_KEY,
     DEFAULT_SNAPSHOT_DATE,
@@ -179,6 +181,32 @@ def _auto_compute():
 
         insert_score_results(job_id, sd, tr, model_key, out)
         insert_customer_risk(job_id, sd, tr, model_key, customer_risk)
+
+        if COMPUTE_AUTO_PUBLISH_SCORE_TO_MYSQL:
+            try:
+                from bad_debt_app.data.db import publish_score_to_hasil_baddebt
+
+                summary = publish_score_to_hasil_baddebt(
+                    df_score=out,
+                    model_key=model_key,
+                    snapshot_date=sd,
+                    time_range=tr,
+                    source_job_id=job_id,
+                    target_table=COMPUTE_PUBLISH_TARGET_TABLE,
+                    replace_partition=True,
+                )
+                logger.info(
+                    "Scheduler auto-published score for job %s to %s (%d rows)",
+                    job_id,
+                    summary.get("table", COMPUTE_PUBLISH_TARGET_TABLE),
+                    int(summary.get("rows_inserted", 0)),
+                )
+            except Exception:
+                logger.exception(
+                    "Scheduler auto-publish score failed for job %s (table=%s)",
+                    job_id,
+                    COMPUTE_PUBLISH_TARGET_TABLE,
+                )
 
         complete_job(
             job_id,

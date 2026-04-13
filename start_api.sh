@@ -3,6 +3,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+# Ensure runtime directories exist (used by PM2 log output).
+mkdir -p local_data/logs
+
 API_HOST="${API_HOST:-0.0.0.0}"
 API_PORT="${API_PORT:-8000}"
 UVICORN_RELOAD="${UVICORN_RELOAD:-false}"

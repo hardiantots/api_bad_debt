@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 from typing import Optional
+from datetime import date
 
 from fastapi import APIRouter, File, Form, UploadFile
 
 from bad_debt_app.api.config import (
     DEFAULT_MODEL_KEY,
-    DEFAULT_SNAPSHOT_DATE,
     THRESHOLD_HIGH,
     THRESHOLD_LOW,
 )
@@ -25,15 +25,21 @@ from bad_debt_app.api.service import (
 router = APIRouter()
 
 
+def _resolve_snapshot_date(snapshot_date: str | None) -> str:
+    return snapshot_date or date.today().isoformat()
+
+
 @router.post("/score")
 async def score(
     invoice_csv: UploadFile = File(...),
     receipt_csv: UploadFile = File(...),
     customer_json: Optional[UploadFile] = File(None),
     model: str = Form(DEFAULT_MODEL_KEY),
-    snapshot_date: str = Form(DEFAULT_SNAPSHOT_DATE),
+    snapshot_date: str | None = Form(None),
     customer_format: Optional[str] = Form(None),
 ):
+    snapshot_date = _resolve_snapshot_date(snapshot_date)
+
     upload_result = await read_upload_bundle(invoice_csv, receipt_csv, customer_json)
     if not isinstance(upload_result, tuple):
         return upload_result
@@ -78,10 +84,12 @@ async def score_csv(
     receipt_csv: UploadFile = File(...),
     customer_json: Optional[UploadFile] = File(None),
     model: str = Form(DEFAULT_MODEL_KEY),
-    snapshot_date: str = Form(DEFAULT_SNAPSHOT_DATE),
+    snapshot_date: str | None = Form(None),
     customer_format: Optional[str] = Form(None),
 ):
     from fastapi.responses import Response
+
+    snapshot_date = _resolve_snapshot_date(snapshot_date)
 
     upload_result = await read_upload_bundle(invoice_csv, receipt_csv, customer_json)
     if not isinstance(upload_result, tuple):
@@ -117,10 +125,12 @@ async def alerts(
     receipt_csv: UploadFile = File(...),
     customer_json: Optional[UploadFile] = File(None),
     model: str = Form(DEFAULT_MODEL_KEY),
-    snapshot_date: str = Form(DEFAULT_SNAPSHOT_DATE),
+    snapshot_date: str | None = Form(None),
     threshold: float = Form(0.3),
     customer_format: Optional[str] = Form(None),
 ):
+    snapshot_date = _resolve_snapshot_date(snapshot_date)
+
     threshold = safe_threshold(threshold)
 
     upload_result = await read_upload_bundle(invoice_csv, receipt_csv, customer_json)
@@ -175,9 +185,11 @@ async def receipt_trigger(
     receipt_csv: UploadFile = File(...),
     customer_json: Optional[UploadFile] = File(None),
     model: str = Form(DEFAULT_MODEL_KEY),
-    snapshot_date: str = Form(DEFAULT_SNAPSHOT_DATE),
+    snapshot_date: str | None = Form(None),
     customer_format: Optional[str] = Form(None),
 ):
+    snapshot_date = _resolve_snapshot_date(snapshot_date)
+
     upload_result = await read_upload_bundle(invoice_csv, receipt_csv, customer_json)
     if not isinstance(upload_result, tuple):
         return upload_result

@@ -7,6 +7,7 @@ Scoring pipeline is triggered via POST /db/compute (routes_compute.py).
 from __future__ import annotations
 
 import math
+from datetime import date
 
 import pandas as pd
 from fastapi import APIRouter, BackgroundTasks, Query
@@ -17,7 +18,6 @@ from bad_debt_app.api.config import (
     COMPUTE_MAX_RUNNING_MINUTES,
     DEFAULT_MODEL_KEY,
     DEFAULT_PAGE_SIZE,
-    DEFAULT_SNAPSHOT_DATE,
     MAX_PAGE_SIZE,
     THRESHOLD_HIGH,
     THRESHOLD_LOW,
@@ -67,6 +67,10 @@ def _validate_custom_window(
             },
         )
     return None
+
+
+def _resolve_snapshot_date(snapshot_date: str | None) -> str:
+    return snapshot_date or date.today().isoformat()
 
 
 def _bootstrap_compute_job(
@@ -177,7 +181,7 @@ def list_models():
 def db_score(
     background_tasks: BackgroundTasks,
     model: str = Query(DEFAULT_MODEL_KEY),
-    snapshot_date: str = Query(DEFAULT_SNAPSHOT_DATE),
+    snapshot_date: str | None = Query(None),
     time_range: str = Query("1w"),
     # Pagination
     page: int = Query(1, ge=1),
@@ -195,6 +199,8 @@ def db_score(
 ):
     """Paginated scoring results from pre-computed data."""
     from bad_debt_app.api.service import resolve_model_key
+
+    snapshot_date = _resolve_snapshot_date(snapshot_date)
 
     invalid = _validate_custom_window(time_range, start_date, end_date)
     if invalid is not None:
@@ -261,7 +267,7 @@ def db_score(
 def db_customer_risk(
     background_tasks: BackgroundTasks,
     model: str = Query(DEFAULT_MODEL_KEY),
-    snapshot_date: str = Query(DEFAULT_SNAPSHOT_DATE),
+    snapshot_date: str | None = Query(None),
     time_range: str = Query("1w"),
     page: int = Query(1, ge=1),
     page_size: int = Query(DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
@@ -275,6 +281,8 @@ def db_customer_risk(
 ):
     """Paginated customer risk aggregation from pre-computed data."""
     from bad_debt_app.api.service import resolve_model_key
+
+    snapshot_date = _resolve_snapshot_date(snapshot_date)
 
     invalid = _validate_custom_window(time_range, start_date, end_date)
     if invalid is not None:
@@ -331,7 +339,7 @@ def db_customer_risk(
 def db_alerts(
     background_tasks: BackgroundTasks,
     model: str = Query(DEFAULT_MODEL_KEY),
-    snapshot_date: str = Query(DEFAULT_SNAPSHOT_DATE),
+    snapshot_date: str | None = Query(None),
     time_range: str = Query("1w"),
     threshold: float = Query(0.3),
     page: int = Query(1, ge=1),
@@ -345,6 +353,8 @@ def db_alerts(
 ):
     """Invoices with prob_bad_debt >= threshold, paginated."""
     from bad_debt_app.api.service import resolve_model_key, safe_threshold
+
+    snapshot_date = _resolve_snapshot_date(snapshot_date)
 
     threshold = safe_threshold(threshold)
     invalid = _validate_custom_window(time_range, start_date, end_date)
@@ -450,13 +460,15 @@ def db_alerts(
 @router.get("/db/score_csv")
 def db_score_csv(
     model: str = Query(DEFAULT_MODEL_KEY),
-    snapshot_date: str = Query(DEFAULT_SNAPSHOT_DATE),
+    snapshot_date: str | None = Query(None),
     time_range: str = Query("1w"),
     start_date: str | None = Query(None),
     end_date: str | None = Query(None),
 ):
     """Export all pre-computed score results as CSV download."""
     from bad_debt_app.api.service import resolve_model_key
+
+    snapshot_date = _resolve_snapshot_date(snapshot_date)
 
     invalid = _validate_custom_window(time_range, start_date, end_date)
     if invalid is not None:
@@ -509,7 +521,7 @@ def db_score_csv(
 def db_receipt_trigger(
     background_tasks: BackgroundTasks,
     model: str = Query(DEFAULT_MODEL_KEY),
-    snapshot_date: str = Query(DEFAULT_SNAPSHOT_DATE),
+    snapshot_date: str | None = Query(None),
     time_range: str = Query("1w"),
     page: int = Query(1, ge=1),
     page_size: int = Query(DEFAULT_PAGE_SIZE, ge=1, le=MAX_PAGE_SIZE),
@@ -523,6 +535,8 @@ def db_receipt_trigger(
 ):
     """Early-warning view of pre-computed scoring results, paginated."""
     from bad_debt_app.api.service import resolve_model_key
+
+    snapshot_date = _resolve_snapshot_date(snapshot_date)
 
     invalid = _validate_custom_window(time_range, start_date, end_date)
     if invalid is not None:
