@@ -49,7 +49,7 @@ def _no_results_response():
         status_code=404,
         content={
             "error": "No pre-computed scoring results found for these parameters.",
-            "hint": "Run POST /db/compute first to generate and publish scoring results.",
+            "hint": "Run POST /db/compute or click Refresh Scoring to generate and publish scoring results.",
         },
     )
 
@@ -80,91 +80,6 @@ def _resolve_snapshot_date(snapshot_date: str | None) -> str:
     return snapshot_date or date.today().isoformat()
 
 
-def _bootstrap_compute_job(
-    background_tasks: BackgroundTasks,
-    model: str,
-    snapshot_date: str,
-    time_range: str,
-    start_date: str | None,
-    end_date: str | None,
-):
-    """Start compute in background and return a 202 payload for bootstrap clients."""
-    from bad_debt_app.api.routes_compute import _run_compute
-    from bad_debt_app.api.service import resolve_model, resolve_model_key
-    from bad_debt_app.data.models import (
-        create_job,
-        generate_job_id,
-        get_all_jobs,
-        has_running_job,
-        recover_stale_running_jobs,
-    )
-
-    if COMPUTE_AUTO_RECOVER_STALE:
-        recover_stale_running_jobs(
-            COMPUTE_MAX_RUNNING_MINUTES,
-            reason="Auto-recovered stale running job before bootstrap compute",
-        )
-
-    if has_running_job():
-        running_job_id = None
-        for job in get_all_jobs(limit=20):
-            if job.get("status") == "running":
-                running_job_id = job.get("job_id")
-                break
-        return JSONResponse(
-            status_code=202,
-            content={
-                "job_id": running_job_id,
-                "status": "running",
-                "message": "Compute job is already running. Waiting for completion.",
-                "status_url": (
-                    f"/db/compute/status/{running_job_id}" if running_job_id else None
-                ),
-            },
-        )
-
-    resolved_key = resolve_model_key(model)
-    m_info = resolve_model(resolved_key)
-    job_id = generate_job_id()
-    compute_time_range = "3m" if time_range in _WARM_CACHE_RANGES else time_range
-
-    create_job(
-        job_id,
-        model_key=resolved_key,
-        model_label=m_info.get("label", resolved_key),
-        model_flow=m_info.get("training_flow"),
-        label_strategy=m_info.get("label_strategy"),
-        snapshot_date=snapshot_date,
-        time_range=compute_time_range,
-        start_date=start_date,
-        end_date=end_date,
-    )
-
-    background_tasks.add_task(
-        _run_compute,
-        job_id=job_id,
-        model_key=resolved_key,
-        snapshot_date=snapshot_date,
-        time_range=compute_time_range,
-        start_date=start_date,
-        end_date=end_date,
-    )
-
-    return JSONResponse(
-        status_code=202,
-        content={
-            "job_id": job_id,
-            "status": "running",
-            "message": (
-                "No pre-computed data found. 3-month warm cache compute started automatically."
-                if compute_time_range == "3m" and time_range in _WARM_CACHE_RANGES
-                else "No pre-computed data found. Compute started automatically."
-            ),
-            "status_url": f"/db/compute/status/{job_id}",
-        },
-    )
-
-
 # ── /models ───────────────────────────────────────────────────────────
 
 
@@ -186,7 +101,6 @@ def list_models():
 
 @router.get("/db/score")
 def db_score(
-    background_tasks: BackgroundTasks,
     model: str = Query(DEFAULT_MODEL_KEY),
     snapshot_date: str | None = Query(None),
     time_range: str = Query("1w"),
@@ -202,7 +116,6 @@ def db_score(
     # Needed to select the exact compute job when time_range=custom.
     start_date: str | None = Query(None),
     end_date: str | None = Query(None),
-    auto_compute_if_missing: bool = Query(False),
 ):
     """Paginated scoring results from pre-computed data."""
     from bad_debt_app.api.service import resolve_model_key
@@ -221,15 +134,6 @@ def db_score(
         target_table=COMPUTE_PUBLISH_TARGET_TABLE,
     )
     if mysql_job is None:
-        if auto_compute_if_missing:
-            return _bootstrap_compute_job(
-                background_tasks,
-                model=resolved_key,
-                snapshot_date=snapshot_date,
-                time_range=time_range,
-                start_date=start_date,
-                end_date=end_date,
-            )
         return _no_results_response()
 
     job_id = str(mysql_job["source_job_id"])
@@ -286,7 +190,6 @@ def db_score(
 
 @router.get("/db/customer_risk")
 def db_customer_risk(
-    background_tasks: BackgroundTasks,
     model: str = Query(DEFAULT_MODEL_KEY),
     snapshot_date: str | None = Query(None),
     time_range: str = Query("1w"),
@@ -298,7 +201,6 @@ def db_customer_risk(
     search: str | None = Query(None),
     start_date: str | None = Query(None),
     end_date: str | None = Query(None),
-    auto_compute_if_missing: bool = Query(False),
 ):
     """Paginated customer risk aggregation from pre-computed data."""
     from bad_debt_app.api.service import resolve_model_key
@@ -327,15 +229,6 @@ def db_customer_risk(
             },
         )
     if job is None:
-        if auto_compute_if_missing:
-            return _bootstrap_compute_job(
-                background_tasks,
-                model=resolved_key,
-                snapshot_date=snapshot_date,
-                time_range=time_range,
-                start_date=start_date,
-                end_date=end_date,
-            )
         return _no_results_response()
 
     job_id = job["job_id"]
@@ -367,7 +260,6 @@ def db_customer_risk(
 
 @router.get("/db/alerts")
 def db_alerts(
-    background_tasks: BackgroundTasks,
     model: str = Query(DEFAULT_MODEL_KEY),
     snapshot_date: str | None = Query(None),
     time_range: str = Query("1w"),
@@ -379,7 +271,6 @@ def db_alerts(
     search: str | None = Query(None),
     start_date: str | None = Query(None),
     end_date: str | None = Query(None),
-    auto_compute_if_missing: bool = Query(False),
 ):
     """Invoices with prob_bad_debt >= threshold, paginated."""
     from bad_debt_app.api.service import resolve_model_key, safe_threshold
@@ -399,15 +290,6 @@ def db_alerts(
         target_table=COMPUTE_PUBLISH_TARGET_TABLE,
     )
     if mysql_job is None:
-        if auto_compute_if_missing:
-            return _bootstrap_compute_job(
-                background_tasks,
-                model=resolved_key,
-                snapshot_date=snapshot_date,
-                time_range=time_range,
-                start_date=start_date,
-                end_date=end_date,
-            )
         return _no_results_response()
 
     job_id = str(mysql_job["source_job_id"])
@@ -517,7 +399,6 @@ def db_score_csv(
 
 @router.get("/db/early_warning/receipt_trigger")
 def db_receipt_trigger(
-    background_tasks: BackgroundTasks,
     model: str = Query(DEFAULT_MODEL_KEY),
     snapshot_date: str | None = Query(None),
     time_range: str = Query("1w"),
@@ -529,7 +410,6 @@ def db_receipt_trigger(
     search: str | None = Query(None),
     start_date: str | None = Query(None),
     end_date: str | None = Query(None),
-    auto_compute_if_missing: bool = Query(False),
 ):
     """Early-warning view of pre-computed scoring results, paginated."""
     from bad_debt_app.api.service import resolve_model_key
@@ -548,15 +428,6 @@ def db_receipt_trigger(
         target_table=COMPUTE_PUBLISH_TARGET_TABLE,
     )
     if mysql_job is None:
-        if auto_compute_if_missing:
-            return _bootstrap_compute_job(
-                background_tasks,
-                model=resolved_key,
-                snapshot_date=snapshot_date,
-                time_range=time_range,
-                start_date=start_date,
-                end_date=end_date,
-            )
         return _no_results_response()
 
     job_id = str(mysql_job["source_job_id"])
