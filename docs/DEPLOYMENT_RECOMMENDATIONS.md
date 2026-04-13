@@ -77,6 +77,12 @@ Dokumen ini berisi saran operasional agar alur hasil prediksi (invoice-level) My
 
 4. Verifikasi log `Auto-published score` untuk `job_id` terbaru.
 
+5. Jika error muncul pada endpoint `GET /db/customer_risk` dengan pesan SQLite tidak bisa dibuka:
+
+- pastikan direktori `local_data/` ada
+- pastikan permission write sesuai user proses PM2
+- restart service setelah permission diperbaiki
+
 ## Checklist Rilis
 
 1. PM2 status `online`.

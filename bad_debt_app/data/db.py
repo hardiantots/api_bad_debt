@@ -354,6 +354,13 @@ def publish_score_to_hasil_baddebt(
         )
 
     rec = df_score.copy()
+    # Keep backward-compatible metadata columns that may exist in target schema.
+    rec["job_id"] = source_job_id
+    rec["model_key"] = model_key
+    rec["snapshot_date"] = snapshot_date
+    rec["time_range"] = time_range
+
+    # Preferred source_* metadata columns for publish tracking.
     rec["source_job_id"] = source_job_id
     rec["source_model_key"] = model_key
     rec["source_snapshot_date"] = snapshot_date
@@ -622,3 +629,57 @@ def fetch_mysql_scores_df_by_source_job(
         engine,
         params={"jid": source_job_id},
     )
+
+
+def get_latest_mysql_source_job(
+    *,
+    model_key: str,
+    snapshot_date: str,
+    time_range: str,
+    target_table: str = "hasil_baddebt",
+) -> dict | None:
+    """Return latest source_job_id and basic metadata from MySQL publish table."""
+    _validate_table_name(target_table)
+    engine = get_engine()
+    with engine.connect() as conn:
+        row = (
+            conn.execute(
+                text(
+                    f"SELECT source_job_id, "
+                    "MAX(published_at) AS last_published_at, "
+                    "COUNT(*) AS total_invoices "
+                    f"FROM {target_table} "
+                    "WHERE source_model_key=:mk "
+                    "AND source_snapshot_date=:sd "
+                    "AND source_time_range=:tr "
+                    "GROUP BY source_job_id "
+                    "ORDER BY last_published_at DESC, source_job_id DESC LIMIT 1"
+                ),
+                {"mk": model_key, "sd": snapshot_date, "tr": time_range},
+            )
+            .mappings()
+            .fetchone()
+        )
+    if not row:
+        return None
+    return dict(row)
+
+
+def query_mysql_risk_summary_by_source_job(
+    *, source_job_id: str, target_table: str = "hasil_baddebt"
+) -> dict[str, int]:
+    _validate_table_name(target_table)
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = (
+            conn.execute(
+                text(
+                    f"SELECT risk_level, COUNT(*) AS cnt FROM {target_table} "
+                    "WHERE source_job_id=:jid GROUP BY risk_level"
+                ),
+                {"jid": source_job_id},
+            )
+            .mappings()
+            .fetchall()
+        )
+    return {str(r["risk_level"]): int(r["cnt"] or 0) for r in rows if r["risk_level"]}

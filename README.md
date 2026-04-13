@@ -124,6 +124,7 @@ Catatan:
 - Dengan `COMPUTE_AUTO_PUBLISH_SCORE_TO_MYSQL=true`, hasil compute invoice-level akan otomatis di-publish ke tabel MySQL terbaru (`COMPUTE_PUBLISH_TARGET_TABLE`) setelah compute sukses.
 - Untuk fase awal, gunakan `COMPUTE_PUBLISH_REPLACE_PARTITION=false` agar publish berjalan append-only tanpa DELETE privilege.
 - Hasil `customer_risk` tetap disimpan di SQLite lokal.
+- Jika endpoint `GET /db/customer_risk` mengembalikan error local DB unavailable, pastikan folder `local_data/` writable oleh user proses PM2.
 
 ## Menjalankan API
 

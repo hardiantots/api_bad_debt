@@ -27,8 +27,10 @@ from bad_debt_app.api.service import model_public_info
 from bad_debt_app.data.db import (
     TIME_RANGE_OPTIONS,
     fetch_mysql_scores_df_by_source_job,
+    get_latest_mysql_source_job,
     get_data_date_range,
     query_mysql_alerts_by_source_job,
+    query_mysql_risk_summary_by_source_job,
     query_mysql_score_results_by_source_job,
     query_mysql_top_efl_by_source_job,
 )
@@ -212,14 +214,13 @@ def db_score(
         return invalid
 
     resolved_key = resolve_model_key(model)
-    job = get_latest_job(
-        resolved_key,
-        snapshot_date,
-        time_range,
-        start_date=start_date,
-        end_date=end_date,
+    mysql_job = get_latest_mysql_source_job(
+        model_key=resolved_key,
+        snapshot_date=snapshot_date,
+        time_range=time_range,
+        target_table=COMPUTE_PUBLISH_TARGET_TABLE,
     )
-    if job is None:
+    if mysql_job is None:
         if auto_compute_if_missing:
             return _bootstrap_compute_job(
                 background_tasks,
@@ -231,7 +232,7 @@ def db_score(
             )
         return _no_results_response()
 
-    job_id = job["job_id"]
+    job_id = str(mysql_job["source_job_id"])
 
     records, total = query_mysql_score_results_by_source_job(
         source_job_id=job_id,
@@ -246,6 +247,11 @@ def db_score(
     if total == 0:
         return _no_results_response()
 
+    risk_summary = query_mysql_risk_summary_by_source_job(
+        source_job_id=job_id,
+        target_table=COMPUTE_PUBLISH_TARGET_TABLE,
+    )
+
     top_efl = query_mysql_top_efl_by_source_job(
         source_job_id=job_id,
         top_n=50,
@@ -254,21 +260,21 @@ def db_score(
 
     return {
         "mode": "snapshot",
-        "model_key": job.get("model_key", model),
-        "model_flow": job.get("model_flow"),
-        "label_strategy": job.get("label_strategy"),
+        "model_key": resolved_key,
+        "model_flow": None,
+        "label_strategy": None,
         "snapshot_date": snapshot_date,
         "time_range": time_range,
-        "model_label": job.get("model_label", ""),
-        "last_computed_at": job.get("completed_at"),
+        "model_label": resolved_key,
+        "last_computed_at": mysql_job.get("last_published_at"),
         "job_id": job_id,
-        "total_invoices": job.get("total_invoices", 0),
+        "total_invoices": int(mysql_job.get("total_invoices", 0) or 0),
         "pagination": _pagination_meta(page, page_size, total),
-        "risk_summary": job.get("risk_summary", {}),
-        "high_risk_count": int(job.get("risk_summary", {}).get("HIGH", 0)),
+        "risk_summary": risk_summary,
+        "high_risk_count": int(risk_summary.get("HIGH", 0)),
         "preview": records,
         "top_efl_invoices": top_efl,
-        "customer_risk_summary": job.get("customer_risk_summary", {}),
+        "customer_risk_summary": {},
     }
 
 
@@ -301,13 +307,22 @@ def db_customer_risk(
         return invalid
 
     resolved_key = resolve_model_key(model)
-    job = get_latest_job(
-        resolved_key,
-        snapshot_date,
-        time_range,
-        start_date=start_date,
-        end_date=end_date,
-    )
+    try:
+        job = get_latest_job(
+            resolved_key,
+            snapshot_date,
+            time_range,
+            start_date=start_date,
+            end_date=end_date,
+        )
+    except Exception as exc:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": "Customer risk local database unavailable.",
+                "detail": str(exc),
+            },
+        )
     if job is None:
         if auto_compute_if_missing:
             return _bootstrap_compute_job(
@@ -374,14 +389,13 @@ def db_alerts(
         return invalid
 
     resolved_key = resolve_model_key(model)
-    job = get_latest_job(
-        resolved_key,
-        snapshot_date,
-        time_range,
-        start_date=start_date,
-        end_date=end_date,
+    mysql_job = get_latest_mysql_source_job(
+        model_key=resolved_key,
+        snapshot_date=snapshot_date,
+        time_range=time_range,
+        target_table=COMPUTE_PUBLISH_TARGET_TABLE,
     )
-    if job is None:
+    if mysql_job is None:
         if auto_compute_if_missing:
             return _bootstrap_compute_job(
                 background_tasks,
@@ -393,7 +407,7 @@ def db_alerts(
             )
         return _no_results_response()
 
-    job_id = job["job_id"]
+    job_id = str(mysql_job["source_job_id"])
 
     rows, alerts_count = query_mysql_alerts_by_source_job(
         source_job_id=job_id,
@@ -406,28 +420,33 @@ def db_alerts(
         target_table=COMPUTE_PUBLISH_TARGET_TABLE,
     )
 
+    risk_summary = query_mysql_risk_summary_by_source_job(
+        source_job_id=job_id,
+        target_table=COMPUTE_PUBLISH_TARGET_TABLE,
+    )
+
     return {
         "mode": "snapshot",
         "threshold": threshold,
-        "model_key": job.get("model_key", model),
-        "model_flow": job.get("model_flow"),
-        "label_strategy": job.get("label_strategy"),
+        "model_key": resolved_key,
+        "model_flow": None,
+        "label_strategy": None,
         "snapshot_date": snapshot_date,
         "time_range": time_range,
-        "model_label": job.get("model_label", ""),
-        "last_computed_at": job.get("completed_at"),
+        "model_label": resolved_key,
+        "last_computed_at": mysql_job.get("last_published_at"),
         "job_id": job_id,
-        "total_invoices": job.get("total_invoices", 0),
+        "total_invoices": int(mysql_job.get("total_invoices", 0) or 0),
         "alerts_count": int(alerts_count),
         "pagination": _pagination_meta(page, page_size, int(alerts_count)),
-        "risk_summary": job.get("risk_summary", {}),
+        "risk_summary": risk_summary,
         "alerts": rows,
         "top_efl_invoices": query_mysql_top_efl_by_source_job(
             source_job_id=job_id,
             top_n=50,
             target_table=COMPUTE_PUBLISH_TARGET_TABLE,
         ),
-        "customer_risk_summary": job.get("customer_risk_summary", {}),
+        "customer_risk_summary": {},
     }
 
 
@@ -452,13 +471,15 @@ def db_score_csv(
         return invalid
 
     resolved_key = resolve_model_key(model)
-    job = get_latest_job(
-        resolved_key,
-        snapshot_date,
-        time_range,
-        start_date=start_date,
-        end_date=end_date,
+    mysql_job = get_latest_mysql_source_job(
+        model_key=resolved_key,
+        snapshot_date=snapshot_date,
+        time_range=time_range,
+        target_table=COMPUTE_PUBLISH_TARGET_TABLE,
     )
+    job = None
+    if mysql_job is not None:
+        job = {"job_id": str(mysql_job["source_job_id"])}
     if job is None:
         return _no_results_response()
 
@@ -514,14 +535,13 @@ def db_receipt_trigger(
         return invalid
 
     resolved_key = resolve_model_key(model)
-    job = get_latest_job(
-        resolved_key,
-        snapshot_date,
-        time_range,
-        start_date=start_date,
-        end_date=end_date,
+    mysql_job = get_latest_mysql_source_job(
+        model_key=resolved_key,
+        snapshot_date=snapshot_date,
+        time_range=time_range,
+        target_table=COMPUTE_PUBLISH_TARGET_TABLE,
     )
-    if job is None:
+    if mysql_job is None:
         if auto_compute_if_missing:
             return _bootstrap_compute_job(
                 background_tasks,
@@ -533,7 +553,7 @@ def db_receipt_trigger(
             )
         return _no_results_response()
 
-    job_id = job["job_id"]
+    job_id = str(mysql_job["source_job_id"])
 
     # All scores (paginated)
     records, total = query_mysql_score_results_by_source_job(
@@ -548,6 +568,11 @@ def db_receipt_trigger(
     )
     if total == 0:
         return _no_results_response()
+
+    risk_summary = query_mysql_risk_summary_by_source_job(
+        source_job_id=job_id,
+        target_table=COMPUTE_PUBLISH_TARGET_TABLE,
+    )
 
     _, alerts_count = query_mysql_alerts_by_source_job(
         source_job_id=job_id,
@@ -574,17 +599,17 @@ def db_receipt_trigger(
         "mode": "early_warning",
         "analysis_type": "Early-Warning (Pre-Due Analysis)",
         "analysis_description": "Mengevaluasi risiko bad debt SEBELUM jatuh tempo.",
-        "model_key": job.get("model_key", model),
-        "model_flow": job.get("model_flow"),
-        "label_strategy": job.get("label_strategy"),
-        "model_label": job.get("model_label", ""),
+        "model_key": resolved_key,
+        "model_flow": None,
+        "label_strategy": None,
+        "model_label": resolved_key,
         "snapshot_date": snapshot_date,
         "time_range": time_range,
-        "last_computed_at": job.get("completed_at"),
+        "last_computed_at": mysql_job.get("last_published_at"),
         "job_id": job_id,
-        "processed_invoices": job.get("total_invoices", 0),
+        "processed_invoices": int(mysql_job.get("total_invoices", 0) or 0),
         "pagination": _pagination_meta(page, page_size, total),
-        "risk_summary": job.get("risk_summary", {}),
+        "risk_summary": risk_summary,
         "alerts_count": int(alerts_count),
         "high_risk_count": int(high_risk_count),
         "all_scores_preview": records,
@@ -593,5 +618,5 @@ def db_receipt_trigger(
             top_n=50,
             target_table=COMPUTE_PUBLISH_TARGET_TABLE,
         ),
-        "customer_risk_summary": job.get("customer_risk_summary", {}),
+        "customer_risk_summary": {},
     }
