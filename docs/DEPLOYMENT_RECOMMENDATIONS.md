@@ -1,6 +1,6 @@
 # Deployment Recommendations
 
-Dokumen ini berisi saran implementasi agar publish hasil prediksi ke MySQL lebih stabil dan efisien.
+Dokumen ini berisi saran operasional agar alur hasil prediksi (invoice-level) MySQL-first tetap stabil dan efisien.
 
 ## Target Operasional
 
@@ -8,7 +8,7 @@ Dokumen ini berisi saran implementasi agar publish hasil prediksi ke MySQL lebih
 2. `customer_risk` tetap di SQLite lokal sampai kebutuhan integrasi berikutnya.
 3. Compute tidak gagal hanya karena kendala privilege DB non-kritis.
 
-## Tahap 1: Stabilkan Mode Append-Only
+## Mode Saat Ini (Disarankan)
 
 1. Gunakan konfigurasi:
 
@@ -20,6 +20,7 @@ Dokumen ini berisi saran implementasi agar publish hasil prediksi ke MySQL lebih
 
 - Publish tidak membutuhkan `DELETE` privilege.
 - Data baru pasti masuk ke MySQL selama `INSERT` privilege tersedia.
+- Endpoint prediksi membaca dari MySQL table (`hasil_baddebt`).
 
 3. Risiko:
 
@@ -29,13 +30,13 @@ Dokumen ini berisi saran implementasi agar publish hasil prediksi ke MySQL lebih
 
 - Konsumen data gunakan `source_job_id` paling baru atau `published_at` terbaru.
 
-## Tahap 2: Kurangi Duplikasi Tanpa DELETE
+## Penguatan Tahap Lanjut
 
 1. Tambahkan kunci unik di MySQL berdasarkan identitas invoice + partisi source.
 2. Ubah strategi insert menjadi upsert (`INSERT ... ON DUPLICATE KEY UPDATE`) bila diperlukan.
 3. Alternatif: jalankan proses dedup terjadwal di sisi DBA.
 
-## Tahap 3: Aktifkan Replace Partition Penuh
+## Opsi Replace Partition Penuh
 
 1. Saat privilege sudah memungkinkan, aktifkan:
 
@@ -58,9 +59,9 @@ Dokumen ini berisi saran implementasi agar publish hasil prediksi ke MySQL lebih
 
 2. Pantau metrik harian:
 
-- jumlah row compute lokal (`bad_debt_score_results`)
-- jumlah row masuk MySQL (`hasil_baddebt`)
-- selisih jumlah row per `source_job_id`
+- jumlah row masuk MySQL (`hasil_baddebt`) per `source_job_id`
+- jumlah row customer risk lokal per `job_id`
+- selisih row antar job untuk partisi yang sama (indikasi duplikasi)
 
 3. Alert sederhana:
 
@@ -70,11 +71,11 @@ Dokumen ini berisi saran implementasi agar publish hasil prediksi ke MySQL lebih
 
 1. Cek privilege DB user.
 2. Cek keberadaan tabel target dan kolom mapping.
-3. Jalankan publish manual endpoint:
+3. Jalankan compute ulang untuk partisi yang bermasalah:
 
-- `POST /db/compute/publish?job_id=<JOB_ID>&table_name=hasil_baddebt&replace_partition=false`
+- `POST /db/compute?model=<MODEL>&snapshot_date=<YYYY-MM-DD>&time_range=<RANGE>`
 
-4. Jika publish manual sukses, fokus perbaikan pada mode auto-publish/environment.
+4. Verifikasi log `Auto-published score` untuk `job_id` terbaru.
 
 ## Checklist Rilis
 
