@@ -105,11 +105,17 @@ COMPUTE_SCHEDULE_HOUR=6
 COMPUTE_AUTO_ENABLED=true
 COMPUTE_DEFAULT_TIME_RANGE=3m
 COMPUTE_KEEP_DAYS=30
+
+# Auto publish score compute ke MySQL (invoice-level)
+COMPUTE_AUTO_PUBLISH_SCORE_TO_MYSQL=true
+COMPUTE_PUBLISH_TARGET_TABLE=hasil_baddebt
 ```
 
 Catatan:
 
 - Endpoint /models tetap bisa merespons walau env DB belum lengkap, dengan fallback date range default.
+- Dengan `COMPUTE_AUTO_PUBLISH_SCORE_TO_MYSQL=true`, hasil compute invoice-level akan otomatis di-publish ke tabel MySQL terbaru (`COMPUTE_PUBLISH_TARGET_TABLE`) setelah compute sukses.
+- Hasil `customer_risk` tetap disimpan di SQLite lokal.
 
 ## Menjalankan API
 
@@ -126,6 +132,61 @@ chmod +x start_api.sh
 ./start_api.sh
 ```
 
+### Linux VM + PM2 (Direkomendasikan untuk service)
+
+File PM2 sudah disiapkan di `ecosystem.config.cjs` dengan nama app `api_bad_debt`.
+
+1. Setup Python environment (sekali saja)
+
+```bash
+cd /path/ke/api_bad_debt
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+2. Install PM2 tanpa sudo (via nvm)
+
+```bash
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh | bash
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
+nvm install --lts
+npm install -g pm2
+pm2 -v
+```
+
+3. Start API dengan PM2
+
+```bash
+cd /path/ke/api_bad_debt
+source .venv/bin/activate
+pm2 start ecosystem.config.cjs --only api_bad_debt
+pm2 status
+pm2 logs api_bad_debt
+```
+
+4. Persist proses PM2
+
+```bash
+pm2 save
+```
+
+Catatan startup otomatis setelah reboot:
+
+- `pm2 startup` biasanya mengeluarkan 1 command yang perlu dijalankan dengan sudo untuk registrasi systemd.
+- Jika tidak punya akses sudo, alternatifnya jalankan `pm2 resurrect` via crontab user (`crontab -e`) dengan `@reboot`.
+
+5. Update setelah git pull
+
+```bash
+cd /path/ke/api_bad_debt
+git pull
+source .venv/bin/activate
+pip install -r requirements.txt
+pm2 restart api_bad_debt --update-env
+```
+
 Atau langsung:
 
 ```bash
@@ -139,6 +200,14 @@ python -m uvicorn api:app --host 0.0.0.0 --port 8000
 3. API jalankan feature engineering + scoring model.
 4. Hasil invoice-level dan customer-level disimpan ke local_data/scoring.db.
 5. Endpoint GET /db/\* hanya membaca hasil pre-computed dari SQLite lokal (read-only, paginated).
+6. Jika dibutuhkan integrasi ke tabel MySQL terbaru, gunakan POST /db/compute/publish untuk push hasil compute ke tabel hasil_baddebt.
+
+7. POST /db/compute/publish
+
+- Fungsi: memindahkan hasil compute invoice-level dari SQLite ke tabel MySQL `hasil_baddebt`.
+- Default: publish job completed terbaru berdasarkan model + snapshot + time_range.
+- Bisa publish job spesifik dengan `job_id`.
+- Mendukung `replace_partition=true` untuk menghapus partisi lama (source_model_key + source_snapshot_date + source_time_range) sebelum insert.
 
 ## Endpoint Utama
 
@@ -194,16 +263,21 @@ Bagian ini merangkum perubahan terbaru supaya frontend, QA, dan tim integrasi pu
 - Snapshot date otomatis memakai tanggal hari ini saat scheduler men-trigger job.
 - Jam tetap mengikuti COMPUTE_SCHEDULE_HOUR.
 
-3. Validasi no pre-compute tetap konsisten.
+3. Default snapshot endpoint dihitung saat request.
+
+- Jika parameter `snapshot_date` tidak dikirim, endpoint compute/read/upload akan memakai tanggal hari ini saat request dieksekusi.
+- Ini mencegah default tanggal menjadi stale saat service berjalan lama.
+
+4. Validasi no pre-compute tetap konsisten.
 
 - Jika belum ada hasil compute untuk kombinasi parameter yang diminta, endpoint read-only mengembalikan 404 + hint untuk menjalankan POST /db/compute.
 
-4. Penyimpanan hasil compute memakai strategi replace partition.
+5. Penyimpanan hasil compute memakai strategi replace partition.
 
 - Untuk kombinasi partisi yang sama (model_key + snapshot_date + time_range, dan khusus custom juga start_date + end_date), data hasil compute lama akan dihapus dulu sebelum insert hasil baru.
 - Tujuan: mencegah duplikasi row lintas job dan memastikan perubahan invoice terbaru menimpa hasil lama pada partisi yang sama.
 
-5. Sequencing replace partition dibuat aman untuk read path.
+6. Sequencing replace partition dibuat aman untuk read path.
 
 - Job baru menyimpan hasil dulu, lalu job ditandai completed, setelah itu barulah data partisi lama dibersihkan.
 - Dengan urutan ini, endpoint GET tetap bisa membaca data completed sebelumnya selama compute baru masih running (menghindari gap data sementara).
@@ -380,6 +454,61 @@ Jika API_KEY di-set, endpoint selain health/docs membutuhkan header:
 - Gunakan process manager:
   - Linux: systemd/supervisor
   - Windows Server: NSSM atau Task Scheduler service mode
+
+## Reinstall Bersih di VM (Hapus Progress Lama)
+
+Gunakan langkah ini jika ingin reset deployment lama lalu install ulang dari repo `api_bad_debt`.
+
+1. Stop proses lama
+
+```bash
+pm2 stop api_bad_debt || true
+pm2 delete api_bad_debt || true
+pm2 save || true
+pkill -f "uvicorn api:app" || true
+```
+
+2. Backup file penting lama (opsional)
+
+```bash
+mkdir -p "$HOME/backup_bad_debt"
+cp -f /path/ke/api_bad_debt/.env "$HOME/backup_bad_debt/.env.$(date +%F_%H%M%S)" || true
+cp -f /path/ke/api_bad_debt/local_data/scoring.db "$HOME/backup_bad_debt/scoring.$(date +%F_%H%M%S).db" || true
+```
+
+3. Hapus folder deployment lama
+
+```bash
+rm -rf /path/ke/api_bad_debt
+```
+
+4. Clone ulang + install dependency
+
+```bash
+cd /path/ke
+git clone <url-repo-anda> api_bad_debt
+cd api_bad_debt
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+5. Restore/isi `.env`
+
+```bash
+cp -f "$HOME/backup_bad_debt/.env.*" .env 2>/dev/null || true
+# Jika file tidak ada, buat .env manual sesuai template di atas.
+```
+
+6. Jalankan ulang dengan PM2
+
+```bash
+pm2 start ecosystem.config.cjs --only api_bad_debt
+pm2 save
+pm2 status
+pm2 logs api_bad_debt
+```
 
 ## Contoh Quick Start Hybrid
 

@@ -63,6 +63,12 @@ COMPUTE_MAX_RUNNING_MINUTES = int(os.getenv("COMPUTE_MAX_RUNNING_MINUTES", "180"
 COMPUTE_AUTO_RECOVER_STALE = (
     os.getenv("COMPUTE_AUTO_RECOVER_STALE", "true").lower() == "true"
 )
+COMPUTE_AUTO_PUBLISH_SCORE_TO_MYSQL = (
+    os.getenv("COMPUTE_AUTO_PUBLISH_SCORE_TO_MYSQL", "true").lower() == "true"
+)
+COMPUTE_PUBLISH_TARGET_TABLE = os.getenv(
+    "COMPUTE_PUBLISH_TARGET_TABLE", "hasil_baddebt"
+)
 
 # ── Pagination ────────────────────────────────────────────────────────
 DEFAULT_PAGE_SIZE = 50

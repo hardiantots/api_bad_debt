@@ -19,7 +19,7 @@ from typing import Optional, TYPE_CHECKING
 
 import pandas as pd
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import URL, Engine
 
 logger = logging.getLogger("bad_debt_api")
@@ -312,3 +312,126 @@ def fetch_raw_inputs(
         fetch_receipts=fetch_receipts,
         raw_frames_cls=RawInputFrames,
     )
+
+
+def _table_columns(engine: Engine, table_name: str) -> set[str]:
+    inspector = inspect(engine)
+    names = {c.get("name") for c in inspector.get_columns(table_name)}
+    return {n for n in names if n}
+
+
+def publish_score_to_hasil_baddebt(
+    *,
+    df_score: pd.DataFrame,
+    model_key: str,
+    snapshot_date: str,
+    time_range: str,
+    source_job_id: str,
+    target_table: str = "hasil_baddebt",
+    replace_partition: bool = True,
+) -> dict:
+    """Publish invoice-level compute output to MySQL table hasil_baddebt.
+
+    Uses the same DB credentials/engine as invoice retrieval.
+    """
+    if df_score is None or df_score.empty:
+        return {
+            "table": target_table,
+            "rows_inserted": 0,
+            "rows_deleted": 0,
+            "message": "No score rows to publish.",
+        }
+
+    if not re.fullmatch(r"[A-Za-z0-9_]+", target_table):
+        raise RuntimeError("Invalid target table name.")
+
+    engine = get_engine()
+    inspector = inspect(engine)
+    if not inspector.has_table(target_table):
+        raise RuntimeError(
+            f"Target table '{target_table}' not found in database '{engine.url.database}'."
+        )
+
+    rec = df_score.copy()
+    rec["source_job_id"] = source_job_id
+    rec["source_model_key"] = model_key
+    rec["source_snapshot_date"] = snapshot_date
+    rec["source_time_range"] = time_range
+
+    # Add created timestamp if target schema supports it.
+    rec["published_at"] = pd.Timestamp.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
+    for c in rec.columns:
+        lower_c = c.lower()
+        if lower_c in {"id"}:
+            continue
+        if lower_c.endswith("_id") or lower_c in {
+            "days_to_due",
+            "trx_amount",
+            "trx_amount_gross",
+            "credit_memo_reduction",
+            "prob_bad_debt",
+            "expected_financial_loss",
+        }:
+            rec[c] = pd.to_numeric(rec[c], errors="coerce")
+
+    rec = rec.replace([float("inf"), float("-inf")], None)
+    rec = rec.where(pd.notnull(rec), None)
+
+    target_cols = _table_columns(engine, target_table)
+    publish_cols = [c for c in rec.columns if c in target_cols and c.lower() != "id"]
+    if not publish_cols:
+        raise RuntimeError(
+            f"No matching columns between compute output and target table '{target_table}'."
+        )
+
+    rows_deleted = 0
+    replace_skipped_reason = None
+    with engine.begin() as conn:
+        if replace_partition:
+            required_partition_cols = {
+                "source_model_key",
+                "source_snapshot_date",
+                "source_time_range",
+            }
+            if required_partition_cols.issubset(target_cols):
+                params = {
+                    "mk": model_key,
+                    "sd": snapshot_date,
+                    "tr": time_range,
+                }
+                result = conn.execute(
+                    text(
+                        f"DELETE FROM {target_table} "
+                        "WHERE source_model_key=:mk "
+                        "AND source_snapshot_date=:sd "
+                        "AND source_time_range=:tr"
+                    ),
+                    params,
+                )
+                rows_deleted = int(result.rowcount or 0)
+            else:
+                replace_skipped_reason = (
+                    "replace_partition skipped because target table lacks "
+                    "source_model_key/source_snapshot_date/source_time_range columns"
+                )
+
+        rec[publish_cols].to_sql(
+            target_table,
+            conn,
+            if_exists="append",
+            index=False,
+            method="multi",
+            chunksize=1000,
+        )
+
+    summary = {
+        "table": target_table,
+        "rows_inserted": int(rec.shape[0]),
+        "rows_deleted": rows_deleted,
+        "replace_partition": replace_partition,
+        "columns_used": publish_cols,
+    }
+    if replace_skipped_reason:
+        summary["replace_partition_note"] = replace_skipped_reason
+    return summary

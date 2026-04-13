@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from datetime import date
 from datetime import timedelta
 
 import numpy as np
@@ -13,11 +14,12 @@ from fastapi import APIRouter, BackgroundTasks, Query
 from fastapi.responses import JSONResponse
 
 from bad_debt_app.api.config import (
+    COMPUTE_AUTO_PUBLISH_SCORE_TO_MYSQL,
     COMPUTE_AUTO_RECOVER_STALE,
     COMPUTE_KEEP_DAYS,
     COMPUTE_MAX_RUNNING_MINUTES,
+    COMPUTE_PUBLISH_TARGET_TABLE,
     DEFAULT_MODEL_KEY,
-    DEFAULT_SNAPSHOT_DATE,
 )
 from bad_debt_app.api.service import (
     apply_customer_exclusion,
@@ -34,8 +36,10 @@ from bad_debt_app.data.models import (
     complete_job,
     create_job,
     fail_job,
+    fetch_score_results_by_job,
     generate_job_id,
     get_all_jobs,
+    get_latest_job,
     get_job,
     has_running_job,
     insert_customer_risk,
@@ -52,6 +56,48 @@ _SHORT_RANGE_DAYS = {
     "2w": 14,
     "1w": 7,
 }
+
+
+def _resolve_snapshot_date(snapshot_date: str | None) -> str:
+    return snapshot_date or date.today().isoformat()
+
+
+def _auto_publish_score_best_effort(
+    *,
+    job_id: str,
+    model_key: str,
+    snapshot_date: str,
+    time_range: str,
+    df_score: pd.DataFrame,
+):
+    """Publish invoice-level score rows to MySQL target table without breaking compute flow."""
+    if not COMPUTE_AUTO_PUBLISH_SCORE_TO_MYSQL:
+        return
+
+    from bad_debt_app.data.db import publish_score_to_hasil_baddebt
+
+    try:
+        summary = publish_score_to_hasil_baddebt(
+            df_score=df_score,
+            model_key=model_key,
+            snapshot_date=snapshot_date,
+            time_range=time_range,
+            source_job_id=job_id,
+            target_table=COMPUTE_PUBLISH_TARGET_TABLE,
+            replace_partition=True,
+        )
+        logger.info(
+            "Auto-published score for job %s to %s (%d rows)",
+            job_id,
+            summary.get("table", COMPUTE_PUBLISH_TARGET_TABLE),
+            int(summary.get("rows_inserted", 0)),
+        )
+    except Exception:
+        logger.exception(
+            "Auto-publish score failed for job %s (table=%s)",
+            job_id,
+            COMPUTE_PUBLISH_TARGET_TABLE,
+        )
 
 
 def _store_partition_results(
@@ -245,6 +291,13 @@ def _run_compute(
             duration_sec=time.time() - start,
         )
         _replace_old_partition_rows(job_id)
+        _auto_publish_score_best_effort(
+            job_id=job_id,
+            model_key=model_key,
+            snapshot_date=snapshot_date,
+            time_range=time_range,
+            df_score=out,
+        )
 
         if time_range == "3m":
             _materialize_short_ranges_from_three_months(
@@ -283,12 +336,14 @@ def _run_compute(
 async def compute(
     background_tasks: BackgroundTasks,
     model: str = Query(DEFAULT_MODEL_KEY),
-    snapshot_date: str = Query(DEFAULT_SNAPSHOT_DATE),
+    snapshot_date: str | None = Query(None),
     time_range: str = Query("1w"),
     start_date: str | None = Query(None),
     end_date: str | None = Query(None),
 ):
     """Trigger scoring pipeline. Runs in background; results stored to local DB."""
+    snapshot_date = _resolve_snapshot_date(snapshot_date)
+
     if time_range == "custom" and (not start_date or not end_date):
         return JSONResponse(
             status_code=422,
@@ -372,3 +427,80 @@ def compute_status(job_id: str):
 def compute_history(limit: int = Query(20, ge=1, le=100)):
     """List recent compute jobs."""
     return {"jobs": get_all_jobs(limit=limit)}
+
+
+@router.post("/db/compute/publish")
+def publish_compute_result(
+    job_id: str | None = Query(None),
+    model: str = Query(DEFAULT_MODEL_KEY),
+    snapshot_date: str | None = Query(None),
+    time_range: str = Query("1w"),
+    start_date: str | None = Query(None),
+    end_date: str | None = Query(None),
+    table_name: str = Query("hasil_baddebt"),
+    replace_partition: bool = Query(True),
+):
+    """Publish completed compute score rows from local SQLite to MySQL table."""
+    from bad_debt_app.data.db import publish_score_to_hasil_baddebt
+
+    snapshot_date = _resolve_snapshot_date(snapshot_date)
+
+    target_job = None
+    if job_id:
+        target_job = get_job(job_id)
+        if target_job is None:
+            return JSONResponse(status_code=404, content={"error": "Job not found."})
+    else:
+        resolved_key = resolve_model_key(model)
+        target_job = get_latest_job(
+            resolved_key,
+            snapshot_date,
+            time_range,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        if target_job is None:
+            return JSONResponse(
+                status_code=404,
+                content={
+                    "error": "No completed compute result found for given parameters."
+                },
+            )
+
+    if target_job.get("status") != "completed":
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": "Selected compute job is not completed yet.",
+                "job_id": target_job.get("job_id"),
+                "status": target_job.get("status"),
+            },
+        )
+
+    df_score = fetch_score_results_by_job(target_job["job_id"])
+
+    try:
+        publish_summary = publish_score_to_hasil_baddebt(
+            df_score=df_score,
+            model_key=target_job.get("model_key", model),
+            snapshot_date=target_job.get("snapshot_date", snapshot_date),
+            time_range=target_job.get("time_range", time_range),
+            source_job_id=target_job["job_id"],
+            target_table=table_name,
+            replace_partition=replace_partition,
+        )
+    except Exception as exc:
+        logger.exception("Failed to publish compute job %s", target_job.get("job_id"))
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"Failed to publish compute result: {exc}"},
+        )
+
+    return {
+        "message": "Compute result published to MySQL.",
+        "job_id": target_job.get("job_id"),
+        "model_key": target_job.get("model_key"),
+        "snapshot_date": target_job.get("snapshot_date"),
+        "time_range": target_job.get("time_range"),
+        "publish": publish_summary,
+    }

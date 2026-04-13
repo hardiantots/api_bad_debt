@@ -639,6 +639,15 @@ def query_top_efl(job_id: str, top_n: int = 50) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def fetch_score_results_by_job(job_id: str) -> pd.DataFrame:
+    """Load all invoice-level score rows for one compute job."""
+    engine = get_local_engine()
+    query = text(
+        "SELECT * FROM bad_debt_score_results WHERE job_id=:jid ORDER BY id ASC"
+    )
+    return pd.read_sql(query, engine, params={"jid": job_id})
+
+
 _ALLOWED_CR_SORT = {
     "cust_score_max",
     "cust_score_mean",
