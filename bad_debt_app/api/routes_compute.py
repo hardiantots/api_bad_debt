@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse
 
 from bad_debt_app.api.config import (
     COMPUTE_AUTO_PUBLISH_SCORE_TO_MYSQL,
+    COMPUTE_PUBLISH_REPLACE_PARTITION,
     COMPUTE_AUTO_RECOVER_STALE,
     COMPUTE_KEEP_DAYS,
     COMPUTE_MAX_RUNNING_MINUTES,
@@ -84,7 +85,7 @@ def _auto_publish_score_best_effort(
             time_range=time_range,
             source_job_id=job_id,
             target_table=COMPUTE_PUBLISH_TARGET_TABLE,
-            replace_partition=True,
+            replace_partition=COMPUTE_PUBLISH_REPLACE_PARTITION,
         )
         logger.info(
             "Auto-published score for job %s to %s (%d rows)",

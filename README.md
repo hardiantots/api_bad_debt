@@ -109,12 +109,18 @@ COMPUTE_KEEP_DAYS=30
 # Auto publish score compute ke MySQL (invoice-level)
 COMPUTE_AUTO_PUBLISH_SCORE_TO_MYSQL=true
 COMPUTE_PUBLISH_TARGET_TABLE=hasil_baddebt
+
+# Mode publish:
+# false = append-only (tanpa DELETE, aman untuk user DB tanpa privilege DELETE)
+# true  = replace-partition (butuh privilege DELETE)
+COMPUTE_PUBLISH_REPLACE_PARTITION=false
 ```
 
 Catatan:
 
 - Endpoint /models tetap bisa merespons walau env DB belum lengkap, dengan fallback date range default.
 - Dengan `COMPUTE_AUTO_PUBLISH_SCORE_TO_MYSQL=true`, hasil compute invoice-level akan otomatis di-publish ke tabel MySQL terbaru (`COMPUTE_PUBLISH_TARGET_TABLE`) setelah compute sukses.
+- Untuk fase awal, gunakan `COMPUTE_PUBLISH_REPLACE_PARTITION=false` agar publish berjalan append-only tanpa DELETE privilege.
 - Hasil `customer_risk` tetap disimpan di SQLite lokal.
 
 ## Menjalankan API
@@ -166,6 +172,8 @@ pm2 status
 pm2 logs api_bad_debt
 ```
 
+Jika sebelumnya muncul error `start_api.sh: exec: python: not found`, script sudah diperbaiki untuk prioritas `.venv/bin/python` lalu fallback ke `python3`.
+
 4. Persist proses PM2
 
 ```bash
@@ -186,6 +194,15 @@ source .venv/bin/activate
 pip install -r requirements.txt
 pm2 restart api_bad_debt --update-env
 ```
+
+6. Validasi publish score ke MySQL (mode tanpa DELETE)
+
+```bash
+curl -X POST "http://127.0.0.1:8000/db/compute?model=stacked&time_range=3m"
+curl "http://127.0.0.1:8000/db/compute/status"
+```
+
+Pastikan pada log ada informasi `Auto-published score` dan tidak ada error `DELETE command denied`.
 
 Atau langsung:
 
@@ -454,6 +471,10 @@ Jika API_KEY di-set, endpoint selain health/docs membutuhkan header:
 - Gunakan process manager:
   - Linux: systemd/supervisor
   - Windows Server: NSSM atau Task Scheduler service mode
+
+## Rekomendasi Lanjutan
+
+Lihat panduan implementasi jangka menengah-panjang di [docs/DEPLOYMENT_RECOMMENDATIONS.md](docs/DEPLOYMENT_RECOMMENDATIONS.md).
 
 ## Reinstall Bersih di VM (Hapus Progress Lama)
 

@@ -69,6 +69,9 @@ COMPUTE_AUTO_PUBLISH_SCORE_TO_MYSQL = (
 COMPUTE_PUBLISH_TARGET_TABLE = os.getenv(
     "COMPUTE_PUBLISH_TARGET_TABLE", "hasil_baddebt"
 )
+COMPUTE_PUBLISH_REPLACE_PARTITION = (
+    os.getenv("COMPUTE_PUBLISH_REPLACE_PARTITION", "false").lower() == "true"
+)
 
 # ── Pagination ────────────────────────────────────────────────────────
 DEFAULT_PAGE_SIZE = 50
