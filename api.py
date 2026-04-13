@@ -26,7 +26,6 @@ from bad_debt_app.api.config import (
     COMPUTE_PUBLISH_TARGET_TABLE,
     COMPUTE_SCHEDULE_HOUR,
     DEFAULT_MODEL_KEY,
-    DEFAULT_SNAPSHOT_DATE,
 )
 from bad_debt_app.api.routes_compute import router as compute_router
 from bad_debt_app.api.routes_db import router as db_router
@@ -119,7 +118,6 @@ def _auto_compute():
         generate_job_id,
         has_running_job,
         insert_customer_risk,
-        insert_score_results,
         recover_stale_running_jobs,
     )
 
@@ -180,7 +178,6 @@ def _auto_compute():
             customer_risk, name_col="CUSTOMER_NAME"
         )
 
-        insert_score_results(job_id, sd, tr, model_key, out)
         insert_customer_risk(job_id, sd, tr, model_key, customer_risk)
 
         if COMPUTE_AUTO_PUBLISH_SCORE_TO_MYSQL:

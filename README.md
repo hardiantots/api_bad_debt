@@ -4,7 +4,8 @@ FastAPI service untuk scoring risiko bad debt berbasis snapshot feature engineer
 
 ## Tujuan
 
-- Menyediakan arsitektur hybrid: read dari MySQL, write hasil scoring ke SQLite lokal.
+- Menjadikan hasil prediksi invoice-level tersimpan dan terbaca dari MySQL (`hasil_baddebt`).
+- Menjaga `customer_risk` tetap di SQLite lokal.
 - Memisahkan proses compute (trigger async) dan proses baca hasil (read-only, paginated).
 - Menjaga inference pipeline sinkron dengan artifacts model.
 - Mendukung filtering customer affiliate Kalla Group dari hasil DB scoring.
@@ -57,10 +58,11 @@ Model API/
   - ar_invoice_list_2
   - ar_receipt_list
   - OracleCustomer
+  - hasil_baddebt
 
 Catatan akses:
 
-- Saat akses MySQL bersifat read-only, API tetap berjalan penuh karena hasil scoring disimpan di SQLite lokal.
+- API memerlukan akses `INSERT` ke tabel `hasil_baddebt` agar hasil prediksi invoice-level tersedia untuk endpoint read.
 
 ## Instalasi
 
@@ -210,21 +212,19 @@ Atau langsung:
 python -m uvicorn api:app --host 0.0.0.0 --port 8000
 ```
 
-## Ringkasan Arsitektur Hybrid
+## Ringkasan Arsitektur
 
 1. Trigger compute via POST /db/compute.
 2. API fetch data source dari MySQL (invoice, receipt, customer).
 3. API jalankan feature engineering + scoring model.
-4. Hasil invoice-level dan customer-level disimpan ke local_data/scoring.db.
-5. Endpoint GET /db/\* hanya membaca hasil pre-computed dari SQLite lokal (read-only, paginated).
-6. Jika dibutuhkan integrasi ke tabel MySQL terbaru, gunakan POST /db/compute/publish untuk push hasil compute ke tabel hasil_baddebt.
+4. Hasil invoice-level dipublish ke tabel MySQL `hasil_baddebt`.
+5. Hasil customer-level (`customer_risk`) disimpan ke local_data/scoring.db.
+6. Endpoint GET /db/score, /db/alerts, /db/score_csv, /db/early_warning/receipt_trigger membaca hasil prediksi dari MySQL.
 
 7. POST /db/compute/publish
 
-- Fungsi: memindahkan hasil compute invoice-level dari SQLite ke tabel MySQL `hasil_baddebt`.
-- Default: publish job completed terbaru berdasarkan model + snapshot + time_range.
-- Bisa publish job spesifik dengan `job_id`.
-- Mendukung `replace_partition=true` untuk menghapus partisi lama (source_model_key + source_snapshot_date + source_time_range) sebelum insert.
+- Kini bersifat endpoint legacy.
+- Hasil prediksi invoice-level dipublish otomatis saat compute berjalan.
 
 ## Endpoint Utama
 
@@ -242,7 +242,7 @@ Bagian ini merangkum perubahan terbaru supaya frontend, QA, dan tim integrasi pu
 
 2. GET /db/score
 
-- Tetap read-only dari SQLite (hasil pre-computed).
+- Read-only dari MySQL publish table (`hasil_baddebt`).
 - Mendukung page, page_size, sort_by, sort_order, search, risk_level.
 - Jika time_range=custom, start_date dan end_date wajib dikirim.
 - Jika custom range tidak lengkap, response 422.
@@ -265,7 +265,7 @@ Bagian ini merangkum perubahan terbaru supaya frontend, QA, dan tim integrasi pu
 
 6. GET /db/score_csv
 
-- Tetap export seluruh hasil score pre-computed.
+- Export seluruh hasil score pre-computed dari MySQL.
 - Jika time_range=custom, start_date dan end_date wajib dikirim.
 
 ### B. Perubahan behavior penting
@@ -320,7 +320,7 @@ Bagian ini merangkum perubahan terbaru supaya frontend, QA, dan tim integrasi pu
     - time_ranges: 1w, 2w, 1m, 3m, 6m, 1y, all, custom.
     - min_date, max_date: rentang data dari DB (fallback jika DB belum siap).
 
-### 2) Compute Endpoint (Write ke SQLite)
+### 2) Compute Endpoint
 
 - POST /db/compute
   - Fungsi: trigger scoring background (async).
@@ -336,9 +336,9 @@ Bagian ini merangkum perubahan terbaru supaya frontend, QA, dan tim integrasi pu
 - GET /db/compute/history
   - Fungsi: list histori compute jobs.
 
-### 3) DB Read-only Endpoint (Baca Hasil Pre-computed)
+### 3) DB Read-only Endpoint (Baca Hasil Prediksi dari MySQL)
 
-Semua endpoint ini tidak menjalankan scoring real-time. Data dibaca dari SQLite berdasarkan hasil compute terbaru.
+Semua endpoint ini tidak menjalankan scoring real-time. Data prediksi invoice-level dibaca dari MySQL `hasil_baddebt` berdasarkan `source_job_id` compute terbaru.
 
 Parameter umum (sesuai endpoint):
 
@@ -400,17 +400,16 @@ Catatan:
 
 ## Alur Kerja API
 
-### A. Flow Compute (Hybrid)
+### A. Flow Compute
 
 1. Client memanggil POST /db/compute.
 2. API membuat compute job status=running.
 3. Background task menjalankan fetch raw data dari MySQL.
 4. Pipeline feature engineering + model scoring dijalankan.
-5. Hasil invoice score disimpan ke bad_debt_score_results (SQLite).
-6. Hasil customer risk disimpan ke bad_debt_customer_risk (SQLite).
+5. Hasil invoice score dipublish ke tabel MySQL `hasil_baddebt`.
+6. Hasil customer risk disimpan ke bad_debt_customer_risk (SQLite lokal).
 7. Job diupdate menjadi completed + metadata summary.
-8. Replace partition: data hasil job lama pada partisi yang sama dibersihkan (untuk mencegah duplikasi).
-9. Data job lama (retention) dibersihkan sesuai COMPUTE_KEEP_DAYS.
+8. Data job lama (retention) dibersihkan sesuai COMPUTE_KEEP_DAYS.
 
 Catatan partisi replace:
 
@@ -423,7 +422,7 @@ Catatan partisi replace:
 1. Client memanggil GET /db/score atau endpoint DB read lain.
 2. API cari latest completed job untuk kombinasi model + snapshot_date + time_range.
 3. Jika time_range=custom, start_date dan end_date ikut dipakai untuk memilih job yang tepat.
-4. API query data dari SQLite menggunakan pagination/filter/sort.
+4. API query data prediksi dari MySQL menggunakan pagination/filter/sort.
 5. API kirim response terstruktur dengan pagination metadata.
 
 ### C. Flow Scheduler
@@ -453,7 +452,7 @@ Catatan partisi replace:
 Untuk proses compute dari data DB:
 
 - Setelah data customer periode scoring didapat dan proses scoring selesai, sistem menghapus customer yang termasuk daftar affiliate di artifacts/list_all_cust_affiliate_kalla.csv.
-- Penghapusan diterapkan sebelum data disimpan ke SQLite sehingga endpoint GET /db/\* otomatis membaca data yang sudah bersih.
+- Penghapusan diterapkan sebelum data dipublish ke MySQL sehingga endpoint prediksi membaca data yang sudah bersih.
 
 ## Keamanan
 
@@ -467,7 +466,7 @@ Jika API_KEY di-set, endpoint selain health/docs membutuhkan header:
 - Set UVICORN_RELOAD=false untuk production.
 - Jalankan di balik reverse proxy (Nginx/Apache) jika endpoint diekspos publik.
 - Simpan .env sebagai secret file VM, jangan commit ke git.
-- Pastikan folder local_data writable oleh proses API (untuk file scoring.db).
+- Pastikan folder local_data writable oleh proses API (untuk customer risk dan metadata compute lokal).
 - Gunakan process manager:
   - Linux: systemd/supervisor
   - Windows Server: NSSM atau Task Scheduler service mode
@@ -531,7 +530,7 @@ pm2 status
 pm2 logs api_bad_debt
 ```
 
-## Contoh Quick Start Hybrid
+## Contoh Quick Start
 
 1. Trigger compute:
 

@@ -1,4 +1,4 @@
-"""POST /db/compute endpoint — triggers scoring and stores results locally."""
+"""POST /db/compute endpoint — triggers scoring and publishes score results to MySQL."""
 
 from __future__ import annotations
 
@@ -37,14 +37,12 @@ from bad_debt_app.data.models import (
     complete_job,
     create_job,
     fail_job,
-    fetch_score_results_by_job,
     generate_job_id,
     get_all_jobs,
     get_latest_job,
     get_job,
     has_running_job,
     insert_customer_risk,
-    insert_score_results,
     recover_stale_running_jobs,
     replace_partition_results_for_job,
 )
@@ -110,14 +108,7 @@ def _store_partition_results(
     invoice_df: pd.DataFrame,
     customer_risk_df: pd.DataFrame,
 ) -> tuple[dict, dict]:
-    """Persist invoice/customer results and return both summaries."""
-    insert_score_results(
-        job_id=job_id,
-        snapshot_date=snapshot_date,
-        time_range=time_range,
-        model_key=model_key,
-        df=invoice_df,
-    )
+    """Persist customer-risk local results and return compute summaries."""
     insert_customer_risk(
         job_id=job_id,
         snapshot_date=snapshot_date,
@@ -217,6 +208,13 @@ def _materialize_short_ranges_from_three_months(
             duration_sec=0.0,
         )
         _replace_old_partition_rows(job_id)
+        _auto_publish_score_best_effort(
+            job_id=job_id,
+            model_key=base_model_key,
+            snapshot_date=snapshot_date,
+            time_range=tr,
+            df_score=out_sub,
+        )
         logger.info(
             "Materialized short-range cache %s: %d invoices, %d customers",
             tr,
@@ -441,9 +439,7 @@ def publish_compute_result(
     table_name: str = Query("hasil_baddebt"),
     replace_partition: bool = Query(True),
 ):
-    """Publish completed compute score rows from local SQLite to MySQL table."""
-    from bad_debt_app.data.db import publish_score_to_hasil_baddebt
-
+    """Legacy endpoint kept for compatibility; score publish now happens during compute."""
     snapshot_date = _resolve_snapshot_date(snapshot_date)
 
     target_job = None
@@ -478,30 +474,15 @@ def publish_compute_result(
             },
         )
 
-    df_score = fetch_score_results_by_job(target_job["job_id"])
-
-    try:
-        publish_summary = publish_score_to_hasil_baddebt(
-            df_score=df_score,
-            model_key=target_job.get("model_key", model),
-            snapshot_date=target_job.get("snapshot_date", snapshot_date),
-            time_range=target_job.get("time_range", time_range),
-            source_job_id=target_job["job_id"],
-            target_table=table_name,
-            replace_partition=replace_partition,
-        )
-    except Exception as exc:
-        logger.exception("Failed to publish compute job %s", target_job.get("job_id"))
-        return JSONResponse(
-            status_code=500,
-            content={"error": f"Failed to publish compute result: {exc}"},
-        )
-
-    return {
-        "message": "Compute result published to MySQL.",
-        "job_id": target_job.get("job_id"),
-        "model_key": target_job.get("model_key"),
-        "snapshot_date": target_job.get("snapshot_date"),
-        "time_range": target_job.get("time_range"),
-        "publish": publish_summary,
-    }
+    return JSONResponse(
+        status_code=410,
+        content={
+            "error": (
+                "Manual publish from local score storage is no longer supported. "
+                "Score results are published to MySQL during compute execution."
+            ),
+            "job_id": target_job.get("job_id"),
+            "target_table": table_name,
+            "replace_partition": replace_partition,
+        },
+    )

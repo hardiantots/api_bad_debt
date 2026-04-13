@@ -1,6 +1,7 @@
-"""DB-backed scoring endpoints — read pre-computed results from local SQLite.
+"""DB-backed scoring endpoints.
 
-GET endpoints are now read-only and paginated.
+Score/invoice prediction endpoints read from MySQL publish table.
+Customer-risk endpoint remains on local SQLite.
 Scoring pipeline is triggered via POST /db/compute (routes_compute.py).
 """
 
@@ -9,13 +10,13 @@ from __future__ import annotations
 import math
 from datetime import date
 
-import pandas as pd
 from fastapi import APIRouter, BackgroundTasks, Query
 from fastapi.responses import JSONResponse, Response
 
 from bad_debt_app.api.config import (
     COMPUTE_AUTO_RECOVER_STALE,
     COMPUTE_MAX_RUNNING_MINUTES,
+    COMPUTE_PUBLISH_TARGET_TABLE,
     DEFAULT_MODEL_KEY,
     DEFAULT_PAGE_SIZE,
     MAX_PAGE_SIZE,
@@ -23,13 +24,17 @@ from bad_debt_app.api.config import (
     THRESHOLD_LOW,
 )
 from bad_debt_app.api.service import model_public_info
-from bad_debt_app.data.db import TIME_RANGE_OPTIONS, get_data_date_range
+from bad_debt_app.data.db import (
+    TIME_RANGE_OPTIONS,
+    fetch_mysql_scores_df_by_source_job,
+    get_data_date_range,
+    query_mysql_alerts_by_source_job,
+    query_mysql_score_results_by_source_job,
+    query_mysql_top_efl_by_source_job,
+)
 from bad_debt_app.data.models import (
     get_latest_job,
-    get_local_engine,
     query_customer_risk,
-    query_score_results,
-    query_top_efl,
 )
 
 router = APIRouter()
@@ -42,7 +47,7 @@ def _no_results_response():
         status_code=404,
         content={
             "error": "No pre-computed scoring results found for these parameters.",
-            "hint": "Run POST /db/compute first to generate scoring results.",
+            "hint": "Run POST /db/compute first to generate and publish scoring results.",
         },
     )
 
@@ -228,17 +233,24 @@ def db_score(
 
     job_id = job["job_id"]
 
-    records, total = query_score_results(
-        job_id=job_id,
+    records, total = query_mysql_score_results_by_source_job(
+        source_job_id=job_id,
         page=page,
         page_size=page_size,
         sort_by=sort_by,
         sort_order=sort_order,
         risk_level=risk_level,
         search=search,
+        target_table=COMPUTE_PUBLISH_TARGET_TABLE,
     )
+    if total == 0:
+        return _no_results_response()
 
-    top_efl = query_top_efl(job_id, 50)
+    top_efl = query_mysql_top_efl_by_source_job(
+        source_job_id=job_id,
+        top_n=50,
+        target_table=COMPUTE_PUBLISH_TARGET_TABLE,
+    )
 
     return {
         "mode": "snapshot",
@@ -383,55 +395,16 @@ def db_alerts(
 
     job_id = job["job_id"]
 
-    # Use custom query with threshold filter
-    from sqlalchemy import text
-
-    if sort_by not in {
-        "prob_bad_debt",
-        "expected_financial_loss",
-        "TRX_AMOUNT",
-        "CUSTOMER_NAME",
-    }:
-        sort_by = "prob_bad_debt"
-    sort_order = (
-        "desc" if sort_order.lower() not in ("asc", "desc") else sort_order.lower()
+    rows, alerts_count = query_mysql_alerts_by_source_job(
+        source_job_id=job_id,
+        threshold=threshold,
+        page=page,
+        page_size=page_size,
+        sort_by=sort_by,
+        sort_order=sort_order,
+        search=search,
+        target_table=COMPUTE_PUBLISH_TARGET_TABLE,
     )
-
-    where_parts = ["job_id=:jid", "prob_bad_debt>=:thr"]
-    params: dict = {"jid": job_id, "thr": threshold}
-    if search:
-        where_parts.append("CUSTOMER_NAME LIKE :s")
-        params["s"] = f"%{search}%"
-    wc = " AND ".join(where_parts)
-
-    engine = get_local_engine()
-    with engine.connect() as conn:
-        alerts_count = (
-            conn.execute(
-                text(f"SELECT COUNT(*) FROM bad_debt_score_results WHERE {wc}"),
-                params,
-            ).scalar()
-            or 0
-        )
-
-        params["lim"] = page_size
-        params["off"] = (page - 1) * page_size
-        cols = (
-            "CUSTOMER_TRX_ID,ACCOUNT_NUMBER,CUSTOMER_NAME,"
-            "TRX_DATE,DUE_DATE,days_to_due,"
-            "TRX_AMOUNT,TRX_AMOUNT_GROSS,credit_memo_reduction,"
-            "prob_bad_debt,risk_level,recommended_action,expected_financial_loss"
-        )
-        rows = (
-            conn.execute(
-                text(
-                    f"SELECT {cols} FROM bad_debt_score_results WHERE {wc} ORDER BY {sort_by} {sort_order} LIMIT :lim OFFSET :off"
-                ),
-                params,
-            )
-            .mappings()
-            .fetchall()
-        )
 
     return {
         "mode": "snapshot",
@@ -448,8 +421,12 @@ def db_alerts(
         "alerts_count": int(alerts_count),
         "pagination": _pagination_meta(page, page_size, int(alerts_count)),
         "risk_summary": job.get("risk_summary", {}),
-        "alerts": [dict(r) for r in rows],
-        "top_efl_invoices": query_top_efl(job_id, 50),
+        "alerts": rows,
+        "top_efl_invoices": query_mysql_top_efl_by_source_job(
+            source_job_id=job_id,
+            top_n=50,
+            target_table=COMPUTE_PUBLISH_TARGET_TABLE,
+        ),
         "customer_risk_summary": job.get("customer_risk_summary", {}),
     }
 
@@ -485,22 +462,16 @@ def db_score_csv(
     if job is None:
         return _no_results_response()
 
-    engine = get_local_engine()
-    from sqlalchemy import text
-
-    df = pd.read_sql(
-        text("SELECT * FROM bad_debt_score_results WHERE job_id=:jid"),
-        engine,
-        params={"jid": job["job_id"]},
+    df = fetch_mysql_scores_df_by_source_job(
+        source_job_id=job["job_id"],
+        target_table=COMPUTE_PUBLISH_TARGET_TABLE,
     )
+    if df.empty:
+        return _no_results_response()
     # Drop internal columns
     for col in (
         "id",
-        "job_id",
-        "snapshot_date",
-        "time_range",
-        "model_key",
-        "created_at",
+        "id",
     ):
         if col in df.columns:
             df = df.drop(columns=[col])
@@ -565,39 +536,39 @@ def db_receipt_trigger(
     job_id = job["job_id"]
 
     # All scores (paginated)
-    records, total = query_score_results(
-        job_id=job_id,
+    records, total = query_mysql_score_results_by_source_job(
+        source_job_id=job_id,
         page=page,
         page_size=page_size,
         sort_by=sort_by,
         sort_order=sort_order,
         risk_level=risk_level,
         search=search,
+        target_table=COMPUTE_PUBLISH_TARGET_TABLE,
     )
+    if total == 0:
+        return _no_results_response()
 
-    # Alerts count (above THRESHOLD_LOW)
-    from sqlalchemy import text
-
-    engine = get_local_engine()
-    with engine.connect() as conn:
-        alerts_count = (
-            conn.execute(
-                text(
-                    "SELECT COUNT(*) FROM bad_debt_score_results WHERE job_id=:jid AND prob_bad_debt>=:thr"
-                ),
-                {"jid": job_id, "thr": THRESHOLD_LOW},
-            ).scalar()
-            or 0
-        )
-        high_risk_count = (
-            conn.execute(
-                text(
-                    "SELECT COUNT(*) FROM bad_debt_score_results WHERE job_id=:jid AND prob_bad_debt>=:thr"
-                ),
-                {"jid": job_id, "thr": THRESHOLD_HIGH},
-            ).scalar()
-            or 0
-        )
+    _, alerts_count = query_mysql_alerts_by_source_job(
+        source_job_id=job_id,
+        threshold=THRESHOLD_LOW,
+        page=1,
+        page_size=1,
+        sort_by="prob_bad_debt",
+        sort_order="desc",
+        search=search,
+        target_table=COMPUTE_PUBLISH_TARGET_TABLE,
+    )
+    _, high_risk_count = query_mysql_alerts_by_source_job(
+        source_job_id=job_id,
+        threshold=THRESHOLD_HIGH,
+        page=1,
+        page_size=1,
+        sort_by="prob_bad_debt",
+        sort_order="desc",
+        search=search,
+        target_table=COMPUTE_PUBLISH_TARGET_TABLE,
+    )
 
     return {
         "mode": "early_warning",
@@ -617,6 +588,10 @@ def db_receipt_trigger(
         "alerts_count": int(alerts_count),
         "high_risk_count": int(high_risk_count),
         "all_scores_preview": records,
-        "top_efl_invoices": query_top_efl(job_id, 50),
+        "top_efl_invoices": query_mysql_top_efl_by_source_job(
+            source_job_id=job_id,
+            top_n=50,
+            target_table=COMPUTE_PUBLISH_TARGET_TABLE,
+        ),
         "customer_risk_summary": job.get("customer_risk_summary", {}),
     }

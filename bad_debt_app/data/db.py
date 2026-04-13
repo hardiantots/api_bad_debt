@@ -447,3 +447,178 @@ def publish_score_to_hasil_baddebt(
     if replace_skipped_reason:
         summary["replace_partition_note"] = replace_skipped_reason
     return summary
+
+
+_MYSQL_ALLOWED_SCORE_SORT = {
+    "prob_bad_debt",
+    "expected_financial_loss",
+    "TRX_AMOUNT",
+    "CUSTOMER_NAME",
+    "TRX_DATE",
+    "DUE_DATE",
+    "days_to_due",
+    "risk_level",
+    "CUSTOMER_TRX_ID",
+}
+
+
+def _validate_table_name(table_name: str) -> None:
+    if not re.fullmatch(r"[A-Za-z0-9_]+", table_name):
+        raise RuntimeError("Invalid target table name.")
+
+
+def query_mysql_score_results_by_source_job(
+    *,
+    source_job_id: str,
+    page: int,
+    page_size: int,
+    sort_by: str,
+    sort_order: str,
+    risk_level: str | None,
+    search: str | None,
+    target_table: str = "hasil_baddebt",
+) -> tuple[list[dict], int]:
+    _validate_table_name(target_table)
+    if sort_by not in _MYSQL_ALLOWED_SCORE_SORT:
+        sort_by = "prob_bad_debt"
+    sort_order = (
+        "desc" if sort_order.lower() not in ("asc", "desc") else sort_order.lower()
+    )
+
+    where = ["source_job_id=:jid"]
+    params: dict[str, object] = {"jid": source_job_id}
+    if risk_level in ("HIGH", "MEDIUM", "LOW"):
+        where.append("risk_level=:rl")
+        params["rl"] = risk_level
+    if search:
+        where.append("CUSTOMER_NAME LIKE :s")
+        params["s"] = f"%{search}%"
+    wc = " AND ".join(where)
+
+    cols = (
+        "CUSTOMER_TRX_ID,ACCOUNT_NUMBER,CUSTOMER_NAME,"
+        "TRX_DATE,DUE_DATE,days_to_due,"
+        "TRX_AMOUNT,TRX_AMOUNT_GROSS,credit_memo_reduction,"
+        "prob_bad_debt,risk_level,recommended_action,expected_financial_loss"
+    )
+
+    engine = get_engine()
+    with engine.connect() as conn:
+        total = (
+            conn.execute(
+                text(f"SELECT COUNT(*) FROM {target_table} WHERE {wc}"), params
+            ).scalar()
+            or 0
+        )
+        params["lim"] = page_size
+        params["off"] = (page - 1) * page_size
+        rows = (
+            conn.execute(
+                text(
+                    f"SELECT {cols} FROM {target_table} WHERE {wc} ORDER BY {sort_by} {sort_order} LIMIT :lim OFFSET :off"
+                ),
+                params,
+            )
+            .mappings()
+            .fetchall()
+        )
+    return [dict(r) for r in rows], int(total)
+
+
+def query_mysql_top_efl_by_source_job(
+    *, source_job_id: str, top_n: int = 50, target_table: str = "hasil_baddebt"
+) -> list[dict]:
+    _validate_table_name(target_table)
+    cols = (
+        "CUSTOMER_TRX_ID,ACCOUNT_NUMBER,CUSTOMER_NAME,"
+        "TRX_DATE,DUE_DATE,days_to_due,"
+        "TRX_AMOUNT,TRX_AMOUNT_GROSS,credit_memo_reduction,"
+        "prob_bad_debt,risk_level,recommended_action,expected_financial_loss"
+    )
+    engine = get_engine()
+    with engine.connect() as conn:
+        rows = (
+            conn.execute(
+                text(
+                    f"SELECT {cols} FROM {target_table} "
+                    "WHERE source_job_id=:jid AND expected_financial_loss IS NOT NULL "
+                    "ORDER BY expected_financial_loss DESC LIMIT :n"
+                ),
+                {"jid": source_job_id, "n": top_n},
+            )
+            .mappings()
+            .fetchall()
+        )
+    return [dict(r) for r in rows]
+
+
+def query_mysql_alerts_by_source_job(
+    *,
+    source_job_id: str,
+    threshold: float,
+    page: int,
+    page_size: int,
+    sort_by: str,
+    sort_order: str,
+    search: str | None,
+    target_table: str = "hasil_baddebt",
+) -> tuple[list[dict], int]:
+    _validate_table_name(target_table)
+    if sort_by not in {
+        "prob_bad_debt",
+        "expected_financial_loss",
+        "TRX_AMOUNT",
+        "CUSTOMER_NAME",
+    }:
+        sort_by = "prob_bad_debt"
+    sort_order = (
+        "desc" if sort_order.lower() not in ("asc", "desc") else sort_order.lower()
+    )
+
+    where = ["source_job_id=:jid", "prob_bad_debt>=:thr"]
+    params: dict[str, object] = {"jid": source_job_id, "thr": threshold}
+    if search:
+        where.append("CUSTOMER_NAME LIKE :s")
+        params["s"] = f"%{search}%"
+    wc = " AND ".join(where)
+
+    cols = (
+        "CUSTOMER_TRX_ID,ACCOUNT_NUMBER,CUSTOMER_NAME,"
+        "TRX_DATE,DUE_DATE,days_to_due,"
+        "TRX_AMOUNT,TRX_AMOUNT_GROSS,credit_memo_reduction,"
+        "prob_bad_debt,risk_level,recommended_action,expected_financial_loss"
+    )
+
+    engine = get_engine()
+    with engine.connect() as conn:
+        total = (
+            conn.execute(
+                text(f"SELECT COUNT(*) FROM {target_table} WHERE {wc}"), params
+            ).scalar()
+            or 0
+        )
+        params["lim"] = page_size
+        params["off"] = (page - 1) * page_size
+        rows = (
+            conn.execute(
+                text(
+                    f"SELECT {cols} FROM {target_table} WHERE {wc} ORDER BY {sort_by} {sort_order} LIMIT :lim OFFSET :off"
+                ),
+                params,
+            )
+            .mappings()
+            .fetchall()
+        )
+    return [dict(r) for r in rows], int(total)
+
+
+def fetch_mysql_scores_df_by_source_job(
+    *, source_job_id: str, target_table: str = "hasil_baddebt"
+) -> pd.DataFrame:
+    _validate_table_name(target_table)
+    engine = get_engine()
+    return pd.read_sql(
+        text(f"SELECT * FROM {target_table} WHERE source_job_id=:jid"),
+        engine,
+        params={"jid": source_job_id},
+    )
