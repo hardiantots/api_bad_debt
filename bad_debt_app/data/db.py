@@ -492,7 +492,7 @@ def query_mysql_score_results_by_source_job(
         "desc" if sort_order.lower() not in ("asc", "desc") else sort_order.lower()
     )
 
-    where = ["source_job_id=:jid"]
+    where = ["(source_job_id=:jid OR (source_job_id IS NULL AND job_id=:jid))"]
     params: dict[str, object] = {"jid": source_job_id}
     if risk_level in ("HIGH", "MEDIUM", "LOW"):
         where.append("risk_level=:rl")
@@ -548,7 +548,8 @@ def query_mysql_top_efl_by_source_job(
             conn.execute(
                 text(
                     f"SELECT {cols} FROM {target_table} "
-                    "WHERE source_job_id=:jid AND expected_financial_loss IS NOT NULL "
+                    "WHERE (source_job_id=:jid OR (source_job_id IS NULL AND job_id=:jid)) "
+                    "AND expected_financial_loss IS NOT NULL "
                     "ORDER BY expected_financial_loss DESC LIMIT :n"
                 ),
                 {"jid": source_job_id, "n": top_n},
@@ -582,7 +583,10 @@ def query_mysql_alerts_by_source_job(
         "desc" if sort_order.lower() not in ("asc", "desc") else sort_order.lower()
     )
 
-    where = ["source_job_id=:jid", "prob_bad_debt>=:thr"]
+    where = [
+        "(source_job_id=:jid OR (source_job_id IS NULL AND job_id=:jid))",
+        "prob_bad_debt>=:thr",
+    ]
     params: dict[str, object] = {"jid": source_job_id, "thr": threshold}
     if search:
         where.append("CUSTOMER_NAME LIKE :s")
@@ -625,7 +629,10 @@ def fetch_mysql_scores_df_by_source_job(
     _validate_table_name(target_table)
     engine = get_engine()
     return pd.read_sql(
-        text(f"SELECT * FROM {target_table} WHERE source_job_id=:jid"),
+        text(
+            f"SELECT * FROM {target_table} "
+            "WHERE (source_job_id=:jid OR (source_job_id IS NULL AND job_id=:jid))"
+        ),
         engine,
         params={"jid": source_job_id},
     )
@@ -645,14 +652,17 @@ def get_latest_mysql_source_job(
         row = (
             conn.execute(
                 text(
-                    f"SELECT source_job_id, "
+                    f"SELECT "
+                    "COALESCE(source_job_id, job_id) AS source_job_id, "
+                    "COALESCE(source_snapshot_date, snapshot_date) AS source_snapshot_date, "
                     "MAX(published_at) AS last_published_at, "
                     "COUNT(*) AS total_invoices "
                     f"FROM {target_table} "
-                    "WHERE source_model_key=:mk "
-                    "AND source_snapshot_date=:sd "
-                    "AND source_time_range=:tr "
-                    "GROUP BY source_job_id "
+                    "WHERE COALESCE(source_model_key, model_key)=:mk "
+                    "AND COALESCE(source_snapshot_date, snapshot_date)=:sd "
+                    "AND COALESCE(source_time_range, time_range)=:tr "
+                    "AND COALESCE(source_job_id, job_id) IS NOT NULL "
+                    "GROUP BY COALESCE(source_job_id, job_id), COALESCE(source_snapshot_date, snapshot_date) "
                     "ORDER BY last_published_at DESC, source_job_id DESC LIMIT 1"
                 ),
                 {"mk": model_key, "sd": snapshot_date, "tr": time_range},
@@ -660,6 +670,28 @@ def get_latest_mysql_source_job(
             .mappings()
             .fetchone()
         )
+        if not row:
+            # Fallback: if no exact snapshot match, return latest available for the model+range.
+            row = (
+                conn.execute(
+                    text(
+                        f"SELECT "
+                        "COALESCE(source_job_id, job_id) AS source_job_id, "
+                        "COALESCE(source_snapshot_date, snapshot_date) AS source_snapshot_date, "
+                        "MAX(published_at) AS last_published_at, "
+                        "COUNT(*) AS total_invoices "
+                        f"FROM {target_table} "
+                        "WHERE COALESCE(source_model_key, model_key)=:mk "
+                        "AND COALESCE(source_time_range, time_range)=:tr "
+                        "AND COALESCE(source_job_id, job_id) IS NOT NULL "
+                        "GROUP BY COALESCE(source_job_id, job_id), COALESCE(source_snapshot_date, snapshot_date) "
+                        "ORDER BY source_snapshot_date DESC, last_published_at DESC LIMIT 1"
+                    ),
+                    {"mk": model_key, "tr": time_range},
+                )
+                .mappings()
+                .fetchone()
+            )
     if not row:
         return None
     return dict(row)
@@ -675,7 +707,8 @@ def query_mysql_risk_summary_by_source_job(
             conn.execute(
                 text(
                     f"SELECT risk_level, COUNT(*) AS cnt FROM {target_table} "
-                    "WHERE source_job_id=:jid GROUP BY risk_level"
+                    "WHERE (source_job_id=:jid OR (source_job_id IS NULL AND job_id=:jid)) "
+                    "GROUP BY risk_level"
                 ),
                 {"jid": source_job_id},
             )

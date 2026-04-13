@@ -264,6 +264,9 @@ def db_score(
         "model_flow": None,
         "label_strategy": None,
         "snapshot_date": snapshot_date,
+        "effective_snapshot_date": str(
+            mysql_job.get("source_snapshot_date") or snapshot_date
+        ),
         "time_range": time_range,
         "model_label": resolved_key,
         "last_computed_at": mysql_job.get("last_published_at"),
@@ -432,6 +435,9 @@ def db_alerts(
         "model_flow": None,
         "label_strategy": None,
         "snapshot_date": snapshot_date,
+        "effective_snapshot_date": str(
+            mysql_job.get("source_snapshot_date") or snapshot_date
+        ),
         "time_range": time_range,
         "model_label": resolved_key,
         "last_computed_at": mysql_job.get("last_published_at"),
@@ -604,6 +610,9 @@ def db_receipt_trigger(
         "label_strategy": None,
         "model_label": resolved_key,
         "snapshot_date": snapshot_date,
+        "effective_snapshot_date": str(
+            mysql_job.get("source_snapshot_date") or snapshot_date
+        ),
         "time_range": time_range,
         "last_computed_at": mysql_job.get("last_published_at"),
         "job_id": job_id,
