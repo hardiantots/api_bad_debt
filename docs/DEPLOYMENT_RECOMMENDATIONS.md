@@ -4,9 +4,11 @@ Dokumen ini berisi saran operasional agar alur hasil prediksi (invoice-level) My
 
 ## Target Operasional
 
-1. Hasil prediksi invoice-level menjadi sumber utama di MySQL (`hasil_baddebt`).
-2. `customer_risk` tetap di SQLite lokal sampai kebutuhan integrasi berikutnya.
-3. Compute tidak gagal hanya karena kendala privilege DB non-kritis.
+1. Arsitektur Pure REST: Semua endpoint yang menyajikan data berjalan secara `Read-Only`. Pemrosesan scoring model hanya terjadi lewat permintaan eksplisit dari Front-End (via _Refresh Scoring_) atau penjadwalan via _Background Cron Job_.
+2. Optimalisasi Dynamic Time Filter: Selalu jadwalkan komputasi untuk range waktu yang paling panjang (misal `3m` atau `6m`). Hasil ini akan melayani permintaan API filter rentang waktu pendek secara efisien melalui kloning subset database.
+3. Hasil prediksi invoice-level menjadi sumber utama integrasi dan disajikan langsung dari MySQL (`hasil_baddebt`); pastikan UUID string `job_id` tidak terurai menjadi `NULL` saat pengisian data.
+4. Struktur `customer_risk` (agregasi pelanggan) tetap terpusat di SQLite lokal (`scoring.db`) sampai kebutuhan integrasi lintas DB berikutnya memintanya dipindah.
+5. Komputasi model (compute payload) tidak gagal secara keseluruhan di tahap akhir publikasi hanya karena user database tidak memiliki hak `DELETE` untuk mereplace partisi.
 
 ## Mode Saat Ini (Disarankan)
 

@@ -240,6 +240,7 @@ Bagian ini merangkum perubahan terbaru supaya frontend, QA, dan tim integrasi pu
 - Tetap sebagai trigger async compute.
 - Response sukses: 202 Accepted + job_id.
 - Jika job lain masih running: 409.
+- **Penting:** Compute model kini direkomendasikan untuk rentang waktu maksimal (misalnya `6m` atau `3m`). Rentang waktu lebih kecil otomatis dicover secara dinamis oleh backend melalui manipulasi query MySQL.
 
 2. GET /db/score
 
@@ -269,9 +270,21 @@ Bagian ini merangkum perubahan terbaru supaya frontend, QA, dan tim integrasi pu
 - Export seluruh hasil score pre-computed dari MySQL.
 - Jika time_range=custom, start_date dan end_date wajib dikirim.
 
+7. GET /db/chart_data
+
+- Data ringkas tanpa pagination khusus keperluan komponen grafik UI (berisi kolom identitas dan scoring) untuk memuat keseluruhan _dataset filter_ dengan cepat.
+
 ### B. Perubahan behavior penting
 
-1. Pemilihan job untuk read-only endpoint lebih aman pada custom range.
+1. **Efisiensi Dynamic Time Filter (Subset SQL)**
+   - Hasil compute dari time range besar (seperti `3m` atau `6m`) secara otomatis digunakan memfilter request time range di bawahnya (misal `1m` atau `2w`). Backend secara dinamis akan memotong data menggunakan SQL `WHERE TRX_DATE >= [tanggal_subset]` sesuai periode yang diminta selama _snapshot date_ dan _model_key_ valid, tanpa membutuhkan komputasi ulang alias _real-time instant loading_.
+
+2. **Arsitektur Pure REST (No Auto-Compute pada GET)**
+   - Endpoint `GET` (`/db/score`, `/db/alerts`, dsb) saat ini bersifat 100% _read-only_.
+   - Fitur _auto-compute_ secara diam-diam di-background (ketika data tidak ditemukan) telah dihapus untuk menghemat memori, mencegah proses tersendat (_blocking_), dan meningkatkan kebersihan arsitektur.
+   - Jika data belum diproses, API langsung merespons dengan `404 Not Found`. Klien/Frontend (_Next.js_) merespons ini dengan tidak menampilkan data dan mengharuskan user untuk secara eksplisit menekan tombol "Refresh Scoring" (`POST /db/compute`).
+
+3. Pemilihan job untuk read-only endpoint lebih aman pada custom range.
 
 - Lookup latest job tidak hanya model + snapshot_date + time_range.
 - Untuk custom, start_date dan end_date ikut dipakai untuk menghindari mismatch antar window custom.
@@ -299,6 +312,10 @@ Bagian ini merangkum perubahan terbaru supaya frontend, QA, dan tim integrasi pu
 
 - Job baru menyimpan hasil dulu, lalu job ditandai completed, setelah itu barulah data partisi lama dibersihkan.
 - Dengan urutan ini, endpoint GET tetap bisa membaca data completed sebelumnya selama compute baru masih running (menghindari gap data sementara).
+
+7. Menangani Metadata MySQL Tanpa Kerusakan.
+
+- API kini memaksa kolom metadata (`job_id` & `source_job_id`) disimpan sebagai String saat dikirim ke MySQL (via Pandas `to_sql`), mencegah data UUID berubah menjadi `NULL`. Efeknya ID Job pada setiap baris data tersimpan sempurna, memungkinkan Dashboard UI menampilkan hasil dengan cepat.
 
 ### C. Status code yang perlu di-handle client
 
