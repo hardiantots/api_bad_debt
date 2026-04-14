@@ -501,7 +501,6 @@ def _build_sql_date_filter(
 
 def query_mysql_score_results(
     *,
-    model_key: str,
     snapshot_date: str,
     job_id: str,
     time_range: str,
@@ -570,7 +569,6 @@ def query_mysql_score_results(
 
 def query_mysql_top_efl(
     *,
-    model_key: str,
     snapshot_date: str,
     job_id: str,
     time_range: str,
@@ -611,7 +609,6 @@ def query_mysql_top_efl(
 
 def query_mysql_alerts(
     *,
-    model_key: str,
     snapshot_date: str,
     job_id: str,
     time_range: str,
@@ -682,7 +679,6 @@ def query_mysql_alerts(
 
 def fetch_mysql_scores_df(
     *,
-    model_key: str,
     snapshot_date: str,
     job_id: str,
     time_range: str,
@@ -779,7 +775,6 @@ def get_latest_mysql_source_job(
 
 def query_mysql_risk_summary(
     *,
-    model_key: str,
     snapshot_date: str,
     job_id: str,
     time_range: str,
