@@ -474,6 +474,27 @@ def _validate_table_name(table_name: str) -> None:
         raise RuntimeError("Invalid target table name.")
 
 
+
+def _build_sql_date_filter(time_range: str, snapshot_date: str, custom_start: str | None = None, custom_end: str | None = None) -> tuple[str, dict]:
+    sql = ""
+    params = {}
+    if time_range == "all":
+        return sql, params
+    
+    if time_range == "custom" and custom_start and custom_end:
+        sql = " AND STR_TO_DATE(TRX_DATE, '%Y-%m-%d') BETWEEN STR_TO_DATE(:dt_st, '%Y-%m-%d') AND STR_TO_DATE(:dt_en, '%Y-%m-%d') "
+        params["dt_st"] = custom_start
+        params["dt_en"] = custom_end
+        return sql, params
+        
+    days = _INTERVAL_MAP.get(time_range, 0)
+    if days > 0:
+        sql = " AND STR_TO_DATE(TRX_DATE, '%Y-%m-%d') >= DATE_SUB(STR_TO_DATE(:dt_sd, '%Y-%m-%d'), INTERVAL :dt_days DAY) "
+        params["dt_sd"] = snapshot_date
+        params["dt_days"] = days
+    return sql, params
+
+
 def query_mysql_score_results(
     *,
     model_key: str,
@@ -667,27 +688,58 @@ def get_latest_mysql_source_job(
 ) -> dict | None:
     _validate_table_name(target_table)
     engine = get_engine()
+    
+    req_days = _INTERVAL_MAP.get(time_range, 0) if time_range != "all" else 9999
+    
     with engine.connect() as conn:
-        row = (
+        rows = (
             conn.execute(
                 text(
-                    f"SELECT "
+                    "SELECT "
                     "COALESCE(source_job_id, job_id) AS source_job_id, "
+                    "COALESCE(source_time_range, time_range) AS source_time_range, "
                     "COALESCE(source_snapshot_date, snapshot_date) AS source_snapshot_date, "
-                    "MAX(published_at) AS last_published_at, "
+                    "published_at AS last_published_at, "
                     "COUNT(*) AS total_invoices "
                     f"FROM {target_table} "
                     "WHERE COALESCE(source_model_key, model_key)=:mk "
                     "AND COALESCE(source_snapshot_date, snapshot_date)=:sd "
-                    "AND COALESCE(source_time_range, time_range)=:tr "
-                    "GROUP BY COALESCE(source_job_id, job_id), COALESCE(source_snapshot_date, snapshot_date) "
-                    "ORDER BY last_published_at DESC LIMIT 1"
+                    "GROUP BY COALESCE(source_job_id, job_id), COALESCE(source_time_range, time_range), COALESCE(source_snapshot_date, snapshot_date), published_at "
+                    "ORDER BY last_published_at DESC"
                 ),
-                {"mk": model_key, "sd": snapshot_date, "tr": time_range},
+                {"mk": model_key, "sd": snapshot_date},
             )
             .mappings()
-            .fetchone()
+            .fetchall()
         )
+        
+    for row in rows:
+        job_tr = row["source_time_range"]
+        if time_range == "custom":
+            if job_tr == "custom": return dict(row)
+        elif job_tr == "all":
+            return dict(row)
+        elif job_tr in _INTERVAL_MAP and time_range in _INTERVAL_MAP:
+            if _INTERVAL_MAP[job_tr] >= req_days:
+                return dict(row)
+                
+    # fallback specific
+    with engine.connect() as conn:
+        row = conn.execute(
+            text(
+                "SELECT "
+                "COALESCE(source_job_id, job_id) AS source_job_id, "
+                "COALESCE(source_snapshot_date, snapshot_date) AS source_snapshot_date, "
+                "MAX(published_at) AS last_published_at "
+                f"FROM {target_table} "
+                "WHERE COALESCE(source_model_key, model_key)=:mk "
+                "AND COALESCE(source_snapshot_date, snapshot_date)=:sd "
+                "AND COALESCE(source_time_range, time_range)=:tr "
+                "GROUP BY COALESCE(source_job_id, job_id), COALESCE(source_snapshot_date, snapshot_date) "
+                "ORDER BY last_published_at DESC LIMIT 1"
+            ),
+            {"mk": model_key, "sd": snapshot_date, "tr": time_range},
+        ).mappings().fetchone()
     return dict(row) if row else None
 
     # Keep old func definition to find it
@@ -717,3 +769,36 @@ def query_mysql_risk_summary(
             .fetchall()
         )
     return {str(r["risk_level"]): int(r["cnt"] or 0) for r in rows if r["risk_level"]}
+
+
+def query_mysql_chart_data(
+    *,
+    job_id: str,
+    snapshot_date: str,
+    time_range: str,
+    custom_start: str | None = None,
+    custom_end: str | None = None,
+    target_table: str = "hasil_baddebt",
+) -> list[dict]:
+    _validate_table_name(target_table)
+    engine = get_engine()
+    
+    date_filter, dt_params = _build_sql_date_filter(time_range, snapshot_date, custom_start, custom_end)
+    params = {"jid": job_id, **dt_params}
+    
+    with engine.connect() as conn:
+        rows = (
+            conn.execute(
+                text(
+                    "SELECT CUSTOMER_TRX_ID, ACCOUNT_NUMBER, CUSTOMER_NAME, "
+                    "prob_bad_debt, expected_financial_loss, risk_level, recommended_action "
+                    f"FROM {target_table} "
+                    "WHERE COALESCE(source_job_id, job_id)=:jid "
+                    + date_filter
+                ),
+                params,
+            )
+            .mappings()
+            .fetchall()
+        )
+    return [dict(r) for r in rows]
