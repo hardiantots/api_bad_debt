@@ -32,6 +32,7 @@ from bad_debt_app.data.db import (
     query_mysql_alerts,
     query_mysql_risk_summary,
     query_mysql_score_results,
+    query_mysql_chart_data,
     query_mysql_top_efl,
 )
 from bad_debt_app.data.models import (
@@ -99,6 +100,52 @@ def list_models():
 # ── GET /db/score ─────────────────────────────────────────────────────
 
 
+
+
+@router.get("/db/chart_data", summary="Lightweight single-request chart payload")
+async def get_chart_data(
+    model: str = Query(DEFAULT_MODEL_KEY, description="Model key to retrieve (e.g. 'stacked')"),
+    snapshot_date: str = Query(None, description="Filter by YYYY-MM-DD. Defaults to today."),
+    time_range: str = Query("all", description="Date distance: 1w, 2w, 1m, custom, or all"),
+    start_date: str = Query(None, description="Start YYYY-MM-DD for custom range"),
+    end_date: str = Query(None, description="End YYYY-MM-DD for custom range"),
+):
+    if time_range not in TIME_RANGE_OPTIONS:
+        return JSONResponse(status_code=400, content={"detail": f"time_range must be one of {list(TIME_RANGE_OPTIONS)}"})
+        
+    s_date = snapshot_date or date.today().isoformat()
+    
+    # 1. Resolve actual partitioned data run
+    source_info = get_latest_mysql_source_job(
+        model_key=model,
+        snapshot_date=s_date,
+        time_range=time_range,
+        target_table=COMPUTE_PUBLISH_TARGET_TABLE
+    )
+    if not source_info:
+        # Fallback to superset "all" if missing subset
+        source_info = get_latest_mysql_source_job(
+            model_key=model,
+            snapshot_date=s_date,
+            time_range="all",
+            target_table=COMPUTE_PUBLISH_TARGET_TABLE
+        )
+        if not source_info:
+            return {"data": []}
+
+    job_id = source_info["source_job_id"]
+    
+    rows = query_mysql_chart_data(
+        job_id=job_id,
+        snapshot_date=s_date,
+        time_range=time_range,
+        custom_start=start_date,
+        custom_end=end_date,
+        target_table=COMPUTE_PUBLISH_TARGET_TABLE
+    )
+    
+    return {"data": rows}
+
 @router.get("/db/score")
 def db_score(
     model: str = Query(DEFAULT_MODEL_KEY),
@@ -139,9 +186,11 @@ def db_score(
     job_id = str(mysql_job["source_job_id"])
 
     records, total = query_mysql_score_results(
-        model_key=resolved_key,
+        job_id=job_id,
         snapshot_date=snapshot_date,
         time_range=time_range,
+        custom_start=start_date,
+        custom_end=end_date,
         page=page,
         page_size=page_size,
         sort_by=sort_by,
@@ -154,16 +203,20 @@ def db_score(
         return _no_results_response()
 
     risk_summary = query_mysql_risk_summary(
-        model_key=resolved_key,
+        job_id=job_id,
         snapshot_date=snapshot_date,
         time_range=time_range,
+        custom_start=start_date,
+        custom_end=end_date,
         target_table=COMPUTE_PUBLISH_TARGET_TABLE,
     )
 
     top_efl = query_mysql_top_efl(
-        model_key=resolved_key,
+        job_id=job_id,
         snapshot_date=snapshot_date,
         time_range=time_range,
+        custom_start=start_date,
+        custom_end=end_date,
         top_n=50,
         target_table=COMPUTE_PUBLISH_TARGET_TABLE,
     )
@@ -301,9 +354,11 @@ def db_alerts(
     job_id = str(mysql_job["source_job_id"])
 
     rows, alerts_count = query_mysql_alerts(
-        model_key=resolved_key,
+        job_id=job_id,
         snapshot_date=snapshot_date,
         time_range=time_range,
+        custom_start=start_date,
+        custom_end=end_date,
         threshold=threshold,
         page=page,
         page_size=page_size,
@@ -314,9 +369,11 @@ def db_alerts(
     )
 
     risk_summary = query_mysql_risk_summary(
-        model_key=resolved_key,
+        job_id=job_id,
         snapshot_date=snapshot_date,
         time_range=time_range,
+        custom_start=start_date,
+        custom_end=end_date,
         target_table=COMPUTE_PUBLISH_TARGET_TABLE,
     )
 
@@ -340,9 +397,11 @@ def db_alerts(
         "risk_summary": risk_summary,
         "alerts": rows,
         "top_efl_invoices": query_mysql_top_efl(
-            model_key=resolved_key,
-            snapshot_date=snapshot_date,
-            time_range=time_range,
+        job_id=job_id,
+        snapshot_date=snapshot_date,
+        time_range=time_range,
+        custom_start=start_date,
+        custom_end=end_date,
             top_n=50,
             target_table=COMPUTE_PUBLISH_TARGET_TABLE,
         ),
@@ -448,9 +507,11 @@ def db_receipt_trigger(
 
     # All scores (paginated)
     records, total = query_mysql_score_results(
-        model_key=resolved_key,
+        job_id=job_id,
         snapshot_date=snapshot_date,
         time_range=time_range,
+        custom_start=start_date,
+        custom_end=end_date,
         page=page,
         page_size=page_size,
         sort_by=sort_by,
@@ -463,16 +524,20 @@ def db_receipt_trigger(
         return _no_results_response()
 
     risk_summary = query_mysql_risk_summary(
-        model_key=resolved_key,
+        job_id=job_id,
         snapshot_date=snapshot_date,
         time_range=time_range,
+        custom_start=start_date,
+        custom_end=end_date,
         target_table=COMPUTE_PUBLISH_TARGET_TABLE,
     )
 
     _, alerts_count = query_mysql_alerts(
-        model_key=resolved_key,
+        job_id=job_id,
         snapshot_date=snapshot_date,
         time_range=time_range,
+        custom_start=start_date,
+        custom_end=end_date,
         threshold=THRESHOLD_LOW,
         page=1,
         page_size=1,
@@ -482,9 +547,11 @@ def db_receipt_trigger(
         target_table=COMPUTE_PUBLISH_TARGET_TABLE,
     )
     _, high_risk_count = query_mysql_alerts(
-        model_key=resolved_key,
+        job_id=job_id,
         snapshot_date=snapshot_date,
         time_range=time_range,
+        custom_start=start_date,
+        custom_end=end_date,
         threshold=THRESHOLD_HIGH,
         page=1,
         page_size=1,
@@ -516,9 +583,11 @@ def db_receipt_trigger(
         "high_risk_count": int(high_risk_count),
         "all_scores_preview": records,
         "top_efl_invoices": query_mysql_top_efl(
-            model_key=resolved_key,
-            snapshot_date=snapshot_date,
-            time_range=time_range,
+        job_id=job_id,
+        snapshot_date=snapshot_date,
+        time_range=time_range,
+        custom_start=start_date,
+        custom_end=end_date,
             top_n=50,
             target_table=COMPUTE_PUBLISH_TARGET_TABLE,
         ),
