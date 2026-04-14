@@ -474,19 +474,23 @@ def _validate_table_name(table_name: str) -> None:
         raise RuntimeError("Invalid target table name.")
 
 
-
-def _build_sql_date_filter(time_range: str, snapshot_date: str, custom_start: str | None = None, custom_end: str | None = None) -> tuple[str, dict]:
+def _build_sql_date_filter(
+    time_range: str,
+    snapshot_date: str,
+    custom_start: str | None = None,
+    custom_end: str | None = None,
+) -> tuple[str, dict]:
     sql = ""
     params = {}
     if time_range == "all":
         return sql, params
-    
+
     if time_range == "custom" and custom_start and custom_end:
         sql = " AND STR_TO_DATE(TRX_DATE, '%Y-%m-%d') BETWEEN STR_TO_DATE(:dt_st, '%Y-%m-%d') AND STR_TO_DATE(:dt_en, '%Y-%m-%d') "
         params["dt_st"] = custom_start
         params["dt_en"] = custom_end
         return sql, params
-        
+
     days = _INTERVAL_MAP.get(time_range, 0)
     if days > 0:
         sql = " AND STR_TO_DATE(TRX_DATE, '%Y-%m-%d') >= DATE_SUB(STR_TO_DATE(:dt_sd, '%Y-%m-%d'), INTERVAL :dt_days DAY) "
@@ -499,7 +503,10 @@ def query_mysql_score_results(
     *,
     model_key: str,
     snapshot_date: str,
+    job_id: str,
     time_range: str,
+    custom_start: str | None = None,
+    custom_end: str | None = None,
     page: int,
     page_size: int,
     sort_by: str,
@@ -515,10 +522,11 @@ def query_mysql_score_results(
         "desc" if sort_order.lower() not in ("asc", "desc") else sort_order.lower()
     )
 
-    where = [
-        "(COALESCE(source_model_key, model_key)=:mk AND COALESCE(source_snapshot_date, snapshot_date)=:sd AND COALESCE(source_time_range, time_range)=:tr)"
-    ]
-    params: dict[str, object] = {"mk": model_key, "sd": snapshot_date, "tr": time_range}
+    date_filter, dt_params = _build_sql_date_filter(
+        time_range, snapshot_date, custom_start, custom_end
+    )
+    where = ["COALESCE(source_job_id, job_id)=:jid " + date_filter]
+    params: dict[str, object] = {"jid": job_id, **dt_params}
     if risk_level in ("HIGH", "MEDIUM", "LOW"):
         where.append("risk_level=:rl")
         params["rl"] = risk_level
@@ -538,7 +546,10 @@ def query_mysql_score_results(
     with engine.connect() as conn:
         total = (
             conn.execute(
-                text(f"SELECT COUNT(*) FROM {target_table} WHERE {wc}"), params
+                text(
+                    f"WITH ranked AS (SELECT CUSTOMER_TRX_ID, ROW_NUMBER() OVER(PARTITION BY CUSTOMER_TRX_ID ORDER BY id DESC) as _rn FROM {target_table} WHERE {wc}) SELECT COUNT(*) FROM ranked WHERE _rn = 1"
+                ),
+                params,
             ).scalar()
             or 0
         )
@@ -547,7 +558,7 @@ def query_mysql_score_results(
         rows = (
             conn.execute(
                 text(
-                    f"SELECT {cols} FROM {target_table} WHERE {wc} ORDER BY {sort_by} {sort_order} LIMIT :lim OFFSET :off"
+                    f"WITH ranked AS (SELECT {cols}, ROW_NUMBER() OVER(PARTITION BY CUSTOMER_TRX_ID ORDER BY id DESC) as _rn FROM {target_table} WHERE {wc}) SELECT {cols} FROM ranked WHERE _rn = 1 ORDER BY {sort_by} {sort_order} LIMIT :lim OFFSET :off"
                 ),
                 params,
             )
@@ -561,7 +572,10 @@ def query_mysql_top_efl(
     *,
     model_key: str,
     snapshot_date: str,
+    job_id: str,
     time_range: str,
+    custom_start: str | None = None,
+    custom_end: str | None = None,
     top_n: int = 50,
     target_table: str = "hasil_baddebt",
 ) -> list[dict]:
@@ -573,16 +587,21 @@ def query_mysql_top_efl(
         "prob_bad_debt,risk_level,recommended_action,expected_financial_loss"
     )
     engine = get_engine()
+    date_filter, dt_params = _build_sql_date_filter(
+        time_range, snapshot_date, custom_start, custom_end
+    )
     with engine.connect() as conn:
         rows = (
             conn.execute(
                 text(
-                    f"SELECT {cols} FROM {target_table} "
-                    "WHERE (COALESCE(source_model_key, model_key)=:mk AND COALESCE(source_snapshot_date, snapshot_date)=:sd AND COALESCE(source_time_range, time_range)=:tr) "
-                    "AND expected_financial_loss IS NOT NULL "
+                    f"WITH ranked AS (SELECT {cols}, ROW_NUMBER() OVER(PARTITION BY CUSTOMER_TRX_ID ORDER BY id DESC) as _rn "
+                    f"FROM {target_table} "
+                    f"WHERE COALESCE(source_job_id, job_id)=:jid {date_filter} "
+                    "AND expected_financial_loss IS NOT NULL) "
+                    f"SELECT {cols} FROM ranked WHERE _rn = 1 "
                     "ORDER BY expected_financial_loss DESC LIMIT :n"
                 ),
-                {"mk": model_key, "sd": snapshot_date, "tr": time_range, "n": top_n},
+                {"jid": job_id, "n": top_n, **dt_params},
             )
             .mappings()
             .fetchall()
@@ -594,7 +613,10 @@ def query_mysql_alerts(
     *,
     model_key: str,
     snapshot_date: str,
+    job_id: str,
     time_range: str,
+    custom_start: str | None = None,
+    custom_end: str | None = None,
     threshold: float,
     page: int,
     page_size: int,
@@ -615,16 +637,11 @@ def query_mysql_alerts(
         "desc" if sort_order.lower() not in ("asc", "desc") else sort_order.lower()
     )
 
-    where = [
-        "(COALESCE(source_model_key, model_key)=:mk AND COALESCE(source_snapshot_date, snapshot_date)=:sd AND COALESCE(source_time_range, time_range)=:tr)",
-        "prob_bad_debt>=:thr",
-    ]
-    params: dict[str, object] = {
-        "mk": model_key,
-        "sd": snapshot_date,
-        "tr": time_range,
-        "thr": threshold,
-    }
+    date_filter, dt_params = _build_sql_date_filter(
+        time_range, snapshot_date, custom_start, custom_end
+    )
+    where = ["COALESCE(source_job_id, job_id)=:jid " + date_filter]
+    params: dict[str, object] = {"jid": job_id, **dt_params}
     if search:
         where.append("CUSTOMER_NAME LIKE :s")
         params["s"] = f"%{search}%"
@@ -641,7 +658,10 @@ def query_mysql_alerts(
     with engine.connect() as conn:
         total = (
             conn.execute(
-                text(f"SELECT COUNT(*) FROM {target_table} WHERE {wc}"), params
+                text(
+                    f"WITH ranked AS (SELECT CUSTOMER_TRX_ID, ROW_NUMBER() OVER(PARTITION BY CUSTOMER_TRX_ID ORDER BY id DESC) as _rn FROM {target_table} WHERE {wc}) SELECT COUNT(*) FROM ranked WHERE _rn = 1"
+                ),
+                params,
             ).scalar()
             or 0
         )
@@ -650,7 +670,7 @@ def query_mysql_alerts(
         rows = (
             conn.execute(
                 text(
-                    f"SELECT {cols} FROM {target_table} WHERE {wc} ORDER BY {sort_by} {sort_order} LIMIT :lim OFFSET :off"
+                    f"WITH ranked AS (SELECT {cols}, ROW_NUMBER() OVER(PARTITION BY CUSTOMER_TRX_ID ORDER BY id DESC) as _rn FROM {target_table} WHERE {wc}) SELECT {cols} FROM ranked WHERE _rn = 1 ORDER BY {sort_by} {sort_order} LIMIT :lim OFFSET :off"
                 ),
                 params,
             )
@@ -664,18 +684,24 @@ def fetch_mysql_scores_df(
     *,
     model_key: str,
     snapshot_date: str,
+    job_id: str,
     time_range: str,
+    custom_start: str | None = None,
+    custom_end: str | None = None,
     target_table: str = "hasil_baddebt",
 ) -> pd.DataFrame:
     _validate_table_name(target_table)
     engine = get_engine()
+    date_filter, dt_params = _build_sql_date_filter(
+        time_range, snapshot_date, custom_start, custom_end
+    )
     return pd.read_sql(
         text(
-            f"SELECT * FROM {target_table} "
-            "WHERE (COALESCE(source_model_key, model_key)=:mk AND COALESCE(source_snapshot_date, snapshot_date)=:sd AND COALESCE(source_time_range, time_range)=:tr)"
+            f"WITH ranked AS (SELECT *, ROW_NUMBER() OVER(PARTITION BY CUSTOMER_TRX_ID ORDER BY id DESC) as _rn FROM {target_table} "
+            f"WHERE COALESCE(source_job_id, job_id)=:jid {date_filter}) SELECT * FROM ranked WHERE _rn = 1"
         ),
         engine,
-        params={"mk": model_key, "sd": snapshot_date, "tr": time_range},
+        params={"jid": job_id, **dt_params},
     )
 
 
@@ -688,9 +714,9 @@ def get_latest_mysql_source_job(
 ) -> dict | None:
     _validate_table_name(target_table)
     engine = get_engine()
-    
+
     req_days = _INTERVAL_MAP.get(time_range, 0) if time_range != "all" else 9999
-    
+
     with engine.connect() as conn:
         rows = (
             conn.execute(
@@ -712,34 +738,39 @@ def get_latest_mysql_source_job(
             .mappings()
             .fetchall()
         )
-        
+
     for row in rows:
         job_tr = row["source_time_range"]
         if time_range == "custom":
-            if job_tr == "custom": return dict(row)
+            if job_tr == "custom":
+                return dict(row)
         elif job_tr == "all":
             return dict(row)
         elif job_tr in _INTERVAL_MAP and time_range in _INTERVAL_MAP:
             if _INTERVAL_MAP[job_tr] >= req_days:
                 return dict(row)
-                
+
     # fallback specific
     with engine.connect() as conn:
-        row = conn.execute(
-            text(
-                "SELECT "
-                "COALESCE(source_job_id, job_id) AS source_job_id, "
-                "COALESCE(source_snapshot_date, snapshot_date) AS source_snapshot_date, "
-                "MAX(published_at) AS last_published_at "
-                f"FROM {target_table} "
-                "WHERE COALESCE(source_model_key, model_key)=:mk "
-                "AND COALESCE(source_snapshot_date, snapshot_date)=:sd "
-                "AND COALESCE(source_time_range, time_range)=:tr "
-                "GROUP BY COALESCE(source_job_id, job_id), COALESCE(source_snapshot_date, snapshot_date) "
-                "ORDER BY last_published_at DESC LIMIT 1"
-            ),
-            {"mk": model_key, "sd": snapshot_date, "tr": time_range},
-        ).mappings().fetchone()
+        row = (
+            conn.execute(
+                text(
+                    "SELECT "
+                    "COALESCE(source_job_id, job_id) AS source_job_id, "
+                    "COALESCE(source_snapshot_date, snapshot_date) AS source_snapshot_date, "
+                    "MAX(published_at) AS last_published_at "
+                    f"FROM {target_table} "
+                    "WHERE COALESCE(source_model_key, model_key)=:mk "
+                    "AND COALESCE(source_snapshot_date, snapshot_date)=:sd "
+                    "AND COALESCE(source_time_range, time_range)=:tr "
+                    "GROUP BY COALESCE(source_job_id, job_id), COALESCE(source_snapshot_date, snapshot_date) "
+                    "ORDER BY last_published_at DESC LIMIT 1"
+                ),
+                {"mk": model_key, "sd": snapshot_date, "tr": time_range},
+            )
+            .mappings()
+            .fetchone()
+        )
     return dict(row) if row else None
 
     # Keep old func definition to find it
@@ -750,20 +781,26 @@ def query_mysql_risk_summary(
     *,
     model_key: str,
     snapshot_date: str,
+    job_id: str,
     time_range: str,
+    custom_start: str | None = None,
+    custom_end: str | None = None,
     target_table: str = "hasil_baddebt",
 ) -> dict[str, int]:
     _validate_table_name(target_table)
     engine = get_engine()
+    date_filter, dt_params = _build_sql_date_filter(
+        time_range, snapshot_date, custom_start, custom_end
+    )
     with engine.connect() as conn:
         rows = (
             conn.execute(
                 text(
                     f"SELECT risk_level, COUNT(*) AS cnt FROM {target_table} "
-                    "WHERE (COALESCE(source_model_key, model_key)=:mk AND COALESCE(source_snapshot_date, snapshot_date)=:sd AND COALESCE(source_time_range, time_range)=:tr) "
+                    f"WHERE COALESCE(source_job_id, job_id)=:jid {date_filter} "
                     "GROUP BY risk_level"
                 ),
-                {"mk": model_key, "sd": snapshot_date, "tr": time_range},
+                {"jid": job_id, **dt_params},
             )
             .mappings()
             .fetchall()
@@ -782,19 +819,23 @@ def query_mysql_chart_data(
 ) -> list[dict]:
     _validate_table_name(target_table)
     engine = get_engine()
-    
-    date_filter, dt_params = _build_sql_date_filter(time_range, snapshot_date, custom_start, custom_end)
+
+    date_filter, dt_params = _build_sql_date_filter(
+        time_range, snapshot_date, custom_start, custom_end
+    )
     params = {"jid": job_id, **dt_params}
-    
+
     with engine.connect() as conn:
         rows = (
             conn.execute(
                 text(
-                    "SELECT CUSTOMER_TRX_ID, ACCOUNT_NUMBER, CUSTOMER_NAME, "
-                    "prob_bad_debt, expected_financial_loss, risk_level, recommended_action "
+                    "WITH ranked AS (SELECT CUSTOMER_TRX_ID, ACCOUNT_NUMBER, CUSTOMER_NAME, "
+                    "prob_bad_debt, expected_financial_loss, risk_level, recommended_action, ROW_NUMBER() OVER(PARTITION BY CUSTOMER_TRX_ID ORDER BY id DESC) as _rn "
                     f"FROM {target_table} "
-                    "WHERE COALESCE(source_job_id, job_id)=:jid "
-                    + date_filter
+                    "WHERE COALESCE(source_job_id, job_id)=:jid " + date_filter + ") "
+                    "SELECT CUSTOMER_TRX_ID, ACCOUNT_NUMBER, CUSTOMER_NAME, prob_bad_debt, "
+                    "expected_financial_loss, risk_level, recommended_action "
+                    "FROM ranked WHERE _rn = 1"
                 ),
                 params,
             )
