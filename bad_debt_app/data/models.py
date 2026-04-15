@@ -347,6 +347,80 @@ def get_latest_job(
         return d
 
 
+# Number of days each time_range key covers (for customer risk fallback comparison)
+_TR_DAYS = {
+    "1w": 7,
+    "2w": 14,
+    "1m": 30,
+    "3m": 90,
+    "6m": 180,
+    "1y": 365,
+    "all": 99999,
+}
+
+
+def get_latest_job_with_fallback(
+    model_key: str,
+    snapshot_date: str,
+    time_range: str,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> dict | None:
+    """Find the best completed job for the given parameters.
+
+    First tries exact time_range match. If not found, looks for a job whose
+    time_range covers at least as many days — so e.g. a 6m job can serve a 1m request.
+    Mirrors the fallback logic used by get_latest_mysql_source_job on the MySQL side.
+    """
+    # 1. Try exact match first
+    job = get_latest_job(
+        model_key, snapshot_date, time_range,
+        start_date=start_date, end_date=end_date,
+    )
+    if job is not None:
+        return job
+
+    # 2. Custom ranges have no sensible fallback
+    if time_range == "custom":
+        return None
+
+    req_days = _TR_DAYS.get(time_range, 0)
+    if req_days == 0:
+        return None
+
+    # 3. Look for any completed job that covers >= req_days, ordered by most recent
+    engine = get_local_engine()
+    with engine.connect() as conn:
+        rows = (
+            conn.execute(
+                text(
+                    "SELECT * FROM bad_debt_compute_jobs "
+                    "WHERE model_key=:mk AND snapshot_date=:sd AND status='completed' "
+                    "ORDER BY completed_at DESC LIMIT 50"
+                ),
+                {"mk": model_key, "sd": snapshot_date},
+            )
+            .mappings()
+            .fetchall()
+        )
+
+    for row in rows:
+        job_tr = row.get("time_range", "")
+        job_days = _TR_DAYS.get(job_tr, 0)
+        if job_days >= req_days:
+            d = dict(row)
+            for k in ("risk_summary_json", "customer_risk_summary_json"):
+                if d.get(k):
+                    d[k.replace("_json", "")] = json.loads(d[k])
+            logger.info(
+                "Customer risk fallback: serving %s request from %s job %s",
+                time_range, job_tr, d.get("job_id"),
+            )
+            return d
+
+    return None
+
+
 def get_all_jobs(limit: int = 20) -> list[dict]:
     engine = get_local_engine()
     with engine.connect() as conn:

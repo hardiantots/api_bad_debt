@@ -838,3 +838,51 @@ def query_mysql_chart_data(
             .fetchall()
         )
     return [dict(r) for r in rows]
+
+
+# ── MySQL cleanup ─────────────────────────────────────────────────────
+
+
+def cleanup_mysql_old_scoring_results(
+    *,
+    target_table: str = "hasil_baddebt",
+    keep_days: int = 1,
+) -> int:
+    """Delete rows from MySQL target table where published_at is older than keep_days.
+
+    Called after a new scoring job completes to keep the DB lean.
+    Returns the number of rows deleted (or -1 if DELETE privilege is not available).
+    """
+    _validate_table_name(target_table)
+    if keep_days < 0:
+        return 0
+
+    try:
+        engine = get_engine()
+        with engine.begin() as conn:
+            result = conn.execute(
+                text(
+                    f"DELETE FROM {target_table} "
+                    "WHERE published_at < DATE_SUB(NOW(), INTERVAL :days DAY)"
+                ),
+                {"days": keep_days},
+            )
+            deleted = int(result.rowcount or 0)
+            if deleted > 0:
+                logger.info(
+                    "MySQL cleanup: removed %d old row(s) from %s (keep_days=%d)",
+                    deleted,
+                    target_table,
+                    keep_days,
+                )
+            return deleted
+    except Exception as exc:
+        err_text = str(exc).lower()
+        if "delete command denied" in err_text:
+            logger.warning(
+                "MySQL cleanup skipped for %s: DELETE privilege not granted to DB user.",
+                target_table,
+            )
+            return -1
+        logger.exception("MySQL cleanup failed for table %s", target_table)
+        return -1

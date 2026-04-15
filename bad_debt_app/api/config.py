@@ -73,6 +73,10 @@ COMPUTE_PUBLISH_REPLACE_PARTITION = (
     os.getenv("COMPUTE_PUBLISH_REPLACE_PARTITION", "false").lower() == "true"
 )
 
+# How many days to keep old rows in MySQL hasil_baddebt after a new scoring job.
+# Default is 1 day — older rows get deleted to keep DB lean.
+COMPUTE_MYSQL_KEEP_DAYS = int(os.getenv("COMPUTE_MYSQL_KEEP_DAYS", "1"))
+
 # ── Pagination ────────────────────────────────────────────────────────
 DEFAULT_PAGE_SIZE = 50
 MAX_PAGE_SIZE = 200

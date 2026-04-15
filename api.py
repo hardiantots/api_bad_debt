@@ -15,11 +15,9 @@ from bad_debt_app.api.config import (
     ALLOW_ORIGINS,
     API_KEY,
     APP_TITLE,
-    COMPUTE_AUTO_PUBLISH_SCORE_TO_MYSQL,
-    COMPUTE_PUBLISH_REPLACE_PARTITION,
-    COMPUTE_AUTO_RECOVER_STALE,
     BASE_DIR,
     COMPUTE_AUTO_ENABLED,
+    COMPUTE_AUTO_RECOVER_STALE,
     COMPUTE_DEFAULT_TIME_RANGE,
     COMPUTE_KEEP_DAYS,
     COMPUTE_MAX_RUNNING_MINUTES,
@@ -245,10 +243,13 @@ async def startup():
 
     if COMPUTE_AUTO_ENABLED:
         try:
-            from apscheduler.schedulers.asyncio import AsyncIOScheduler
+            # Use BackgroundScheduler (runs in a daemon thread) so that
+            # _auto_compute (a synchronous, long-running function) does NOT
+            # block the FastAPI/uvicorn asyncio event loop.
+            from apscheduler.schedulers.background import BackgroundScheduler
 
             global _scheduler
-            _scheduler = AsyncIOScheduler()
+            _scheduler = BackgroundScheduler()
             _scheduler.add_job(
                 _auto_compute,
                 trigger="cron",
@@ -256,11 +257,17 @@ async def startup():
                 minute=0,
                 id="daily_scoring",
                 replace_existing=True,
+                misfire_grace_time=3600,  # allow up to 1h late start
             )
             _scheduler.start()
+
+            # Confirm next scheduled run in the log
+            job = _scheduler.get_job("daily_scoring")
+            next_run = job.next_run_time if job else "unknown"
             logger.info(
-                "APScheduler started: auto-compute daily at %02d:00",
+                "APScheduler (BackgroundScheduler) started: auto-compute daily at %02d:00 — next run: %s",
                 COMPUTE_SCHEDULE_HOUR,
+                next_run,
             )
         except ImportError:
             logger.warning(
