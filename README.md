@@ -5,7 +5,7 @@ FastAPI service untuk scoring risiko bad debt berbasis snapshot feature engineer
 ## Tujuan
 
 - Menjadikan hasil prediksi invoice-level tersimpan dan terbaca dari MySQL (`hasil_baddebt`).
-- Menjaga `customer_risk` tetap di SQLite lokal.
+- Memigrasikan dan menyajikan hasil agregasi risiko pelanggan (`customer_risk`) dari SQLite ke dalam tabel baru di MySQL.
 - Memisahkan proses compute (trigger async) dan proses baca hasil (read-only, paginated).
 - Menjaga inference pipeline sinkron dengan artifacts model.
 - Mendukung filtering customer affiliate Kalla Group dari hasil DB scoring.
@@ -114,17 +114,17 @@ COMPUTE_PUBLISH_TARGET_TABLE=hasil_baddebt
 
 # Mode publish:
 # false = append-only (tanpa DELETE, aman untuk user DB tanpa privilege DELETE)
-# true  = replace-partition (butuh privilege DELETE)
-COMPUTE_PUBLISH_REPLACE_PARTITION=false
+# true  = replace-partition (butuh privilege DELETE, disarankan)
+COMPUTE_PUBLISH_REPLACE_PARTITION=true
 ```
 
 Catatan:
 
 - Endpoint /models tetap bisa merespons walau env DB belum lengkap, dengan fallback date range default.
 - Dengan `COMPUTE_AUTO_PUBLISH_SCORE_TO_MYSQL=true`, hasil compute invoice-level akan otomatis di-publish ke tabel MySQL terbaru (`COMPUTE_PUBLISH_TARGET_TABLE`) setelah compute sukses.
-- Untuk fase awal, gunakan `COMPUTE_PUBLISH_REPLACE_PARTITION=false` agar publish berjalan append-only tanpa DELETE privilege.
-- Hasil `customer_risk` tetap disimpan di SQLite lokal.
-- Jika endpoint `GET /db/customer_risk` mengembalikan error local DB unavailable, pastikan folder `local_data/` writable oleh user proses PM2.
+- Sebagai standar operasional saat ini, gunakan `COMPUTE_PUBLISH_REPLACE_PARTITION=true` agar tabel tetap bersih (membutuhkan `DELETE` privilege di DB).
+- Hasil agregasi pelanggan (`customer_risk`) secara aktif akan dipublish ke tabel MySQL `customer_risk`.
+- Pastikan koneksi ke MySQL dapat berjalan dengan lancar saat _scoring_, karena endpoint `GET /db/customer_risk` kini mengambil data sepenuhnya dari sana.
 
 ## Menjalankan API
 
@@ -219,8 +219,8 @@ python -m uvicorn api:app --host 0.0.0.0 --port 8000
 2. API fetch data source dari MySQL (invoice, receipt, customer).
 3. API jalankan feature engineering + scoring model.
 4. Hasil invoice-level dipublish ke tabel MySQL `hasil_baddebt`.
-5. Hasil customer-level (`customer_risk`) disimpan ke local_data/scoring.db.
-6. Endpoint GET /db/score, /db/alerts, /db/score_csv, /db/early_warning/receipt_trigger membaca hasil prediksi dari MySQL.
+5. Hasil customer-level dipublish ke tabel MySQL `customer_risk`.
+6. Endpoint `GET` terkait database membaca hasil prediksi langsung dari MySQL.
 
 7. POST /db/compute/publish
 
@@ -425,7 +425,7 @@ Catatan:
 3. Background task menjalankan fetch raw data dari MySQL.
 4. Pipeline feature engineering + model scoring dijalankan.
 5. Hasil invoice score dipublish ke tabel MySQL `hasil_baddebt`.
-6. Hasil customer risk disimpan ke bad_debt_customer_risk (SQLite lokal).
+6. Hasil customer risk ikut direplace dan dipublish ke tabel MySQL `customer_risk`.
 7. Job diupdate menjadi completed + metadata summary.
 8. Data job lama (retention) dibersihkan sesuai COMPUTE_KEEP_DAYS.
 
@@ -484,7 +484,7 @@ Jika API_KEY di-set, endpoint selain health/docs membutuhkan header:
 - Set UVICORN_RELOAD=false untuk production.
 - Jalankan di balik reverse proxy (Nginx/Apache) jika endpoint diekspos publik.
 - Simpan .env sebagai secret file VM, jangan commit ke git.
-- Pastikan folder local_data writable oleh proses API (untuk customer risk dan metadata compute lokal).
+- Pastikan folder local_data writable oleh proses API untuk sekedar keperluan log/temporary run time.
 - Gunakan process manager:
   - Linux: systemd/supervisor
   - Windows Server: NSSM atau Task Scheduler service mode
@@ -511,7 +511,7 @@ pkill -f "uvicorn api:app" || true
 ```bash
 mkdir -p "$HOME/backup_bad_debt"
 cp -f /path/ke/api_bad_debt/.env "$HOME/backup_bad_debt/.env.$(date +%F_%H%M%S)" || true
-cp -f /path/ke/api_bad_debt/local_data/scoring.db "$HOME/backup_bad_debt/scoring.$(date +%F_%H%M%S).db" || true
+# (Tabel scoring.db SQLite tidak lagi menjadi penyimpanan aktif utama)
 ```
 
 3. Hapus folder deployment lama

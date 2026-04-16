@@ -371,6 +371,10 @@ def get_latest_job_with_fallback(
     First tries exact time_range match. If not found, looks for a job whose
     time_range covers at least as many days — so e.g. a 6m job can serve a 1m request.
     Mirrors the fallback logic used by get_latest_mysql_source_job on the MySQL side.
+
+    When a wider-range fallback job is used, the returned dict includes:
+      - ``_fallback_used``: True
+      - ``effective_time_range``: the actual time_range of the fallback job
     """
     # 1. Try exact match first
     job = get_latest_job(
@@ -412,6 +416,9 @@ def get_latest_job_with_fallback(
             for k in ("risk_summary_json", "customer_risk_summary_json"):
                 if d.get(k):
                     d[k.replace("_json", "")] = json.loads(d[k])
+            # Mark that a wider-range fallback was used so callers can notify the user
+            d["_fallback_used"] = True
+            d["effective_time_range"] = job_tr
             logger.info(
                 "Customer risk fallback: serving %s request from %s job %s",
                 time_range, job_tr, d.get("job_id"),
