@@ -269,6 +269,8 @@ def db_customer_risk(
 
     Falls back to a wider-range job if no exact match exists — e.g. a 6m job
     can serve a 1m or 2w request without requiring a separate scoring run.
+    When fallback is used, the response includes ``effective_time_range`` and
+    ``fallback_notice`` so the frontend can display a contextual message.
     """
     snapshot_date = _resolve_snapshot_date(snapshot_date)
 
@@ -307,10 +309,24 @@ def db_customer_risk(
         search=search,
     )
 
+    # Detect if a wider-range fallback job was used
+    fallback_used: bool = job.get("_fallback_used", False)
+    effective_time_range: str = job.get("effective_time_range", time_range)
+    fallback_notice: str | None = None
+    if fallback_used and effective_time_range != time_range:
+        from bad_debt_app.data.db import TIME_RANGE_OPTIONS
+        effective_label = TIME_RANGE_OPTIONS.get(effective_time_range, effective_time_range)
+        fallback_notice = (
+            f"Data customer risk ditampilkan dari compute periode {effective_label} "
+            f"karena compute untuk periode yang dipilih belum tersedia."
+        )
+
     return {
         "mode": "snapshot",
         "snapshot_date": snapshot_date,
         "time_range": time_range,
+        "effective_time_range": effective_time_range,
+        "fallback_notice": fallback_notice,
         "model_key": job.get("model_key", model),
         "last_computed_at": job.get("completed_at"),
         "job_id": job_id,

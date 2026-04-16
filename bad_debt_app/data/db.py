@@ -13,6 +13,8 @@ from __future__ import annotations
 import logging
 import os
 import re
+import threading
+import time
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
@@ -701,33 +703,41 @@ def fetch_mysql_scores_df(
     )
 
 
-def get_latest_mysql_source_job(
+# ── TTL cache for get_latest_mysql_source_job ─────────────────────────
+# Avoids a heavy GROUP-BY full-table-scan on every filter change.
+_mysql_job_cache: dict[tuple, tuple] = {}
+_mysql_job_cache_lock = threading.Lock()
+_MYSQL_JOB_CACHE_TTL = 30  # seconds
+
+
+def _lookup_mysql_source_job(
     *,
+    engine,
     model_key: str,
     snapshot_date: str,
     time_range: str,
-    target_table: str = "hasil_baddebt",
+    target_table: str,
 ) -> dict | None:
-    _validate_table_name(target_table)
-    engine = get_engine()
-
+    """Internal uncached implementation of the MySQL source-job lookup."""
     req_days = _INTERVAL_MAP.get(time_range, 0) if time_range != "all" else 9999
 
     with engine.connect() as conn:
         rows = (
             conn.execute(
                 text(
-                    "SELECT "
-                    "COALESCE(source_job_id, job_id) AS source_job_id, "
-                    "COALESCE(source_time_range, time_range) AS source_time_range, "
-                    "COALESCE(source_snapshot_date, snapshot_date) AS source_snapshot_date, "
-                    "published_at AS last_published_at, "
-                    "COUNT(*) AS total_invoices "
+                    f"SELECT "
+                    f"COALESCE(source_job_id, job_id) AS source_job_id, "
+                    f"COALESCE(source_time_range, time_range) AS source_time_range, "
+                    f"COALESCE(source_snapshot_date, snapshot_date) AS source_snapshot_date, "
+                    f"published_at AS last_published_at, "
+                    f"COUNT(*) AS total_invoices "
                     f"FROM {target_table} "
-                    "WHERE COALESCE(source_model_key, model_key)=:mk "
-                    "AND COALESCE(source_snapshot_date, snapshot_date)=:sd "
-                    "GROUP BY COALESCE(source_job_id, job_id), COALESCE(source_time_range, time_range), COALESCE(source_snapshot_date, snapshot_date), published_at "
-                    "ORDER BY last_published_at DESC"
+                    f"WHERE COALESCE(source_model_key, model_key)=:mk "
+                    f"AND COALESCE(source_snapshot_date, snapshot_date)=:sd "
+                    f"GROUP BY COALESCE(source_job_id, job_id), "
+                    f"COALESCE(source_time_range, time_range), "
+                    f"COALESCE(source_snapshot_date, snapshot_date), published_at "
+                    f"ORDER BY last_published_at DESC"
                 ),
                 {"mk": model_key, "sd": snapshot_date},
             )
@@ -735,6 +745,7 @@ def get_latest_mysql_source_job(
             .fetchall()
         )
 
+    # Prefer job whose stored range covers the requested range
     for row in rows:
         job_tr = row["source_time_range"]
         if time_range == "custom":
@@ -746,21 +757,22 @@ def get_latest_mysql_source_job(
             if _INTERVAL_MAP[job_tr] >= req_days:
                 return dict(row)
 
-    # fallback specific
+    # Exact-match fallback (covers cases like time_range=="custom" with no match above)
     with engine.connect() as conn:
         row = (
             conn.execute(
                 text(
-                    "SELECT "
-                    "COALESCE(source_job_id, job_id) AS source_job_id, "
-                    "COALESCE(source_snapshot_date, snapshot_date) AS source_snapshot_date, "
-                    "MAX(published_at) AS last_published_at "
+                    f"SELECT "
+                    f"COALESCE(source_job_id, job_id) AS source_job_id, "
+                    f"COALESCE(source_snapshot_date, snapshot_date) AS source_snapshot_date, "
+                    f"MAX(published_at) AS last_published_at "
                     f"FROM {target_table} "
-                    "WHERE COALESCE(source_model_key, model_key)=:mk "
-                    "AND COALESCE(source_snapshot_date, snapshot_date)=:sd "
-                    "AND COALESCE(source_time_range, time_range)=:tr "
-                    "GROUP BY COALESCE(source_job_id, job_id), COALESCE(source_snapshot_date, snapshot_date) "
-                    "ORDER BY last_published_at DESC LIMIT 1"
+                    f"WHERE COALESCE(source_model_key, model_key)=:mk "
+                    f"AND COALESCE(source_snapshot_date, snapshot_date)=:sd "
+                    f"AND COALESCE(source_time_range, time_range)=:tr "
+                    f"GROUP BY COALESCE(source_job_id, job_id), "
+                    f"COALESCE(source_snapshot_date, snapshot_date) "
+                    f"ORDER BY last_published_at DESC LIMIT 1"
                 ),
                 {"mk": model_key, "sd": snapshot_date, "tr": time_range},
             )
@@ -769,8 +781,41 @@ def get_latest_mysql_source_job(
         )
     return dict(row) if row else None
 
-    # Keep old func definition to find it
-    return dict(row)
+
+def get_latest_mysql_source_job(
+    *,
+    model_key: str,
+    snapshot_date: str,
+    time_range: str,
+    target_table: str = "hasil_baddebt",
+) -> dict | None:
+    """Return the most recent published MySQL job matching the given parameters.
+
+    Results are cached for _MYSQL_JOB_CACHE_TTL seconds to avoid repeated
+    heavy GROUP-BY full-table-scans on every filter change from the frontend.
+    """
+    _validate_table_name(target_table)
+    cache_key = (model_key, snapshot_date, time_range, target_table)
+    now = time.monotonic()
+
+    with _mysql_job_cache_lock:
+        if cache_key in _mysql_job_cache:
+            cached_result, cached_at = _mysql_job_cache[cache_key]
+            if now - cached_at < _MYSQL_JOB_CACHE_TTL:
+                return cached_result
+
+    result = _lookup_mysql_source_job(
+        engine=get_engine(),
+        model_key=model_key,
+        snapshot_date=snapshot_date,
+        time_range=time_range,
+        target_table=target_table,
+    )
+
+    with _mysql_job_cache_lock:
+        _mysql_job_cache[cache_key] = (result, now)
+
+    return result
 
 
 def query_mysql_risk_summary(
