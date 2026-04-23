@@ -204,6 +204,7 @@ def prepare_base_tables(
                 "_in_customer_master_party",
                 "ACCOUNT_NUMBER",
                 "CUSTOMER_NAME",
+                "BU_NAME",
             ]
             if c in df_cust.columns
         ]
@@ -260,6 +261,10 @@ def prepare_base_tables(
             inplace=True,
             errors="ignore",
         )
+
+        # Rename BU_NAME → SBU for consistent downstream output
+        if "BU_NAME" in df_invoice.columns:
+            df_invoice.rename(columns={"BU_NAME": "SBU"}, inplace=True)
     else:
         df_invoice["cust_master_missing"] = 1
 
@@ -273,6 +278,7 @@ def prepare_base_tables(
             "PARTY_ID",
             "ACCOUNT_NUMBER",
             "CUSTOMER_NAME",
+            "SBU",
             "cust_master_missing",
             "TRANS_TYPE",
             "CURRENCY_CODE",

@@ -20,6 +20,7 @@ def make_features_pre_due(
             "PARTY_ID",
             "ACCOUNT_NUMBER",
             "CUSTOMER_NAME",
+            "SBU",
             "cust_master_missing",
             "TRANS_TYPE",
             "CURRENCY_CODE",
