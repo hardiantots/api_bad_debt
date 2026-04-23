@@ -281,7 +281,7 @@ def fetch_customers(engine: Optional[Engine] = None) -> pd.DataFrame:
     eng = engine or get_engine()
     query = text(
         """
-        SELECT PARTY_ID, ACCOUNT_NUMBER, TRX_NUMBER, CUSTOMER_NAME
+        SELECT PARTY_ID, ACCOUNT_NUMBER, TRX_NUMBER, CUSTOMER_NAME, BU_NAME
         FROM OracleCustomer
     """
     )
@@ -463,6 +463,7 @@ _MYSQL_ALLOWED_SCORE_SORT = {
     "expected_financial_loss",
     "TRX_AMOUNT",
     "CUSTOMER_NAME",
+    "SBU",
     "TRX_DATE",
     "DUE_DATE",
     "days_to_due",
@@ -537,7 +538,7 @@ def query_mysql_score_results(
     wc = " AND ".join(where)
 
     cols = (
-        "CUSTOMER_TRX_ID,ACCOUNT_NUMBER,CUSTOMER_NAME,"
+        "CUSTOMER_TRX_ID,ACCOUNT_NUMBER,CUSTOMER_NAME,SBU,"
         "TRX_DATE,DUE_DATE,days_to_due,"
         "TRX_AMOUNT,TRX_AMOUNT_GROSS,credit_memo_reduction,"
         "prob_bad_debt,risk_level,recommended_action,expected_financial_loss"
@@ -581,7 +582,7 @@ def query_mysql_top_efl(
 ) -> list[dict]:
     _validate_table_name(target_table)
     cols = (
-        "CUSTOMER_TRX_ID,ACCOUNT_NUMBER,CUSTOMER_NAME,"
+        "CUSTOMER_TRX_ID,ACCOUNT_NUMBER,CUSTOMER_NAME,SBU,"
         "TRX_DATE,DUE_DATE,days_to_due,"
         "TRX_AMOUNT,TRX_AMOUNT_GROSS,credit_memo_reduction,"
         "prob_bad_debt,risk_level,recommended_action,expected_financial_loss"
@@ -647,7 +648,7 @@ def query_mysql_alerts(
     wc = " AND ".join(where)
 
     cols = (
-        "CUSTOMER_TRX_ID,ACCOUNT_NUMBER,CUSTOMER_NAME,"
+        "CUSTOMER_TRX_ID,ACCOUNT_NUMBER,CUSTOMER_NAME,SBU,"
         "TRX_DATE,DUE_DATE,days_to_due,"
         "TRX_AMOUNT,TRX_AMOUNT_GROSS,credit_memo_reduction,"
         "prob_bad_debt,risk_level,recommended_action,expected_financial_loss"
@@ -869,11 +870,11 @@ def query_mysql_chart_data(
         rows = (
             conn.execute(
                 text(
-                    "WITH ranked AS (SELECT CUSTOMER_TRX_ID, ACCOUNT_NUMBER, CUSTOMER_NAME, "
+                    "WITH ranked AS (SELECT CUSTOMER_TRX_ID, ACCOUNT_NUMBER, CUSTOMER_NAME, SBU, "
                     "prob_bad_debt, expected_financial_loss, risk_level, recommended_action, ROW_NUMBER() OVER(PARTITION BY CUSTOMER_TRX_ID ORDER BY id DESC) as _rn "
                     f"FROM {target_table} "
                     "WHERE COALESCE(source_job_id, job_id)=:jid " + date_filter + ") "
-                    "SELECT CUSTOMER_TRX_ID, ACCOUNT_NUMBER, CUSTOMER_NAME, prob_bad_debt, "
+                    "SELECT CUSTOMER_TRX_ID, ACCOUNT_NUMBER, CUSTOMER_NAME, SBU, prob_bad_debt, "
                     "expected_financial_loss, risk_level, recommended_action "
                     "FROM ranked WHERE _rn = 1"
                 ),

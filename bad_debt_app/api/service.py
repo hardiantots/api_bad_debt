@@ -366,6 +366,8 @@ def score_snapshot(
         cols["ACCOUNT_NUMBER"] = df_feat["ACCOUNT_NUMBER"]
     if "CUSTOMER_NAME" in df_feat.columns and df_feat["CUSTOMER_NAME"].notna().any():
         cols["CUSTOMER_NAME"] = df_feat["CUSTOMER_NAME"]
+    if "SBU" in df_feat.columns and df_feat["SBU"].notna().any():
+        cols["SBU"] = df_feat["SBU"]
     cols["CUSTOMER_TRX_ID"] = df_feat.get("CUSTOMER_TRX_ID")
 
     if "TRX_DATE" in df_feat.columns:
