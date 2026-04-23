@@ -14,7 +14,7 @@ module.exports = {
       env: {
         PYTHONUNBUFFERED: "1",
         API_HOST: "0.0.0.0",
-        API_PORT: "8000",
+        API_PORT: "8001",
         UVICORN_RELOAD: "false",
       },
       error_file: "./local_data/logs/pm2-error.log",
